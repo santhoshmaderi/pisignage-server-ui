@@ -1,447 +1,637 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Card } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Switch } from '@/components/ui/switch'
 import { Icon } from '@/components/Icon'
-import { clearCredentials } from '@/lib/auth'
+import { cn } from '@/lib/utils'
+import { saveCredentials } from '@/lib/auth'
 import {
+  deleteLicense,
+  fetchLicenses,
   fetchServerInfo,
   fetchSettings,
   saveSettings,
+  uploadLicenses,
   type Settings as ServerSettings,
 } from '@/lib/settings'
 
-type CredsChange = { user: string; password: string; confirm: string } | null
+const inputCls =
+  'w-full bg-surface-container-low border border-border-industrial rounded-lg px-4 py-2.5 text-body-md font-data-mono text-on-surface focus:border-primary focus:outline-none transition-colors placeholder:text-text-muted'
+
+/** Behavior defaults from the server's settings schema (app/models/settings.js). */
+const DEFAULT_BEHAVIORS: Partial<ServerSettings> = {
+  enableYoutubeDl: true,
+  forceTvOn: false,
+  disableCECPowerCheck: false,
+  systemMessagesHide: false,
+  hideWelcomeNotice: false,
+  enableLog: false,
+}
 
 export function Settings() {
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
 
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: fetchSettings })
+  const licensesQuery = useQuery({ queryKey: ['licenses'], queryFn: fetchLicenses })
   const serverInfoQuery = useQuery({
     queryKey: ['serverInfo'],
     queryFn: fetchServerInfo,
     staleTime: 5 * 60_000,
   })
 
-  // Working copy for the non-credential fields.
+  // Working copy of the full settings document (includes authCredentials, which
+  // the old UI binds directly). Field names mirror the server schema 1:1.
   const [working, setWorking] = useState<ServerSettings | null>(null)
-  // Pending credential change is kept separate; it's only sent if the user
-  // explicitly fills it in (we never round-trip the loaded password).
-  const [creds, setCreds] = useState<CredsChange>(null)
-  const [credsError, setCredsError] = useState<string | null>(null)
+  const [savingKey, setSavingKey] = useState<string | null>(null)
+  const [savedKey, setSavedKey] = useState<string | null>(null)
 
   useEffect(() => {
-    if (settingsQuery.data) setWorking(stripCreds(settingsQuery.data))
+    if (settingsQuery.data) setWorking(settingsQuery.data)
   }, [settingsQuery.data])
 
-  const dirtyFields = useMemo(() => {
-    if (!working || !settingsQuery.data) return false
-    return JSON.stringify(working) !== JSON.stringify(stripCreds(settingsQuery.data))
-  }, [working, settingsQuery.data])
-
-  const dirtyCreds = creds !== null && (creds.user.length > 0 || creds.password.length > 0)
-  const dirty = dirtyFields || dirtyCreds
-
   const saveMut = useMutation({
-    mutationFn: async (patch: Partial<ServerSettings>) => saveSettings(patch),
-    onSuccess: (saved) => {
+    mutationFn: (patch: Partial<ServerSettings>) => saveSettings(patch),
+    onSuccess: (saved, patch) => {
       queryClient.setQueryData(['settings'], saved)
-      // If credentials changed, our cached Basic auth header is now stale —
-      // force a sign-out so the login flow re-prompts with the new password.
-      if (dirtyCreds) {
-        clearCredentials()
-        navigate('/login', { replace: true })
-      } else {
-        setCreds(null)
+      setWorking(saved)
+      // The download-access credentials double as this console's HTTP Basic
+      // creds. When they change, refresh the stored header so the session keeps
+      // working instead of 401-ing on the next request.
+      if (patch.authCredentials?.user) {
+        saveCredentials({
+          username: patch.authCredentials.user,
+          password: patch.authCredentials.password ?? '',
+        })
       }
+      const key = savingKey
+      setSavedKey(key)
+      setTimeout(() => setSavedKey((k) => (k === key ? null : k)), 2000)
+    },
+    onSettled: () => setSavingKey(null),
+  })
+
+  const save = (key: string, patch: Partial<ServerSettings>) => {
+    setSavingKey(key)
+    saveMut.mutate(patch)
+  }
+
+  // License upload
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [licenseSearch, setLicenseSearch] = useState('')
+  const [selectedLicense, setSelectedLicense] = useState('')
+
+  const uploadMut = useMutation({
+    mutationFn: (files: File[]) => uploadLicenses(files),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['licenses'] }),
+  })
+  const deleteLicenseMut = useMutation({
+    mutationFn: (filename: string) => deleteLicense(filename),
+    onSuccess: (remaining) => {
+      queryClient.setQueryData(['licenses'], remaining)
+      setSelectedLicense('')
     },
   })
 
   if (settingsQuery.isLoading || working == null) {
     return (
-      <Card className="p-10 text-center">
+      <div className="p-10 text-center bg-surface-container rounded-xl border border-border-industrial">
         <Icon name="hourglass_top" className="text-text-muted/50" size={36} />
         <p className="text-body-md text-text-muted mt-2">Loading settings…</p>
-      </Card>
+      </div>
     )
   }
 
   if (settingsQuery.isError) {
     const err = settingsQuery.error
     return (
-      <Card className="p-5 flex items-center gap-3 border-status-offline/30 bg-status-offline/10">
+      <div className="p-5 flex items-center gap-3 rounded-xl border border-status-offline/30 bg-status-offline/10">
         <Icon name="cloud_off" className="text-status-offline" />
         <div>
           <p className="text-body-md text-text-vibrant">Couldn't load settings</p>
-          <p className="text-body-sm text-text-muted font-mono">
+          <p className="text-body-sm text-text-muted font-data-mono">
             {err instanceof Error ? err.message : 'Unknown error'}
           </p>
         </div>
-      </Card>
+      </div>
     )
   }
 
-  const submit = () => {
-    setCredsError(null)
-    let patch: Partial<ServerSettings> = { ...working }
-    if (creds && (creds.user || creds.password)) {
-      if (creds.password && creds.password !== creds.confirm) {
-        setCredsError('Password and confirmation do not match.')
-        return
-      }
-      if (!creds.user) {
-        setCredsError('Username cannot be empty.')
-        return
-      }
-      patch = {
-        ...patch,
-        authCredentials: {
-          user: creds.user,
-          ...(creds.password ? { password: creds.password } : {}),
-        },
-      }
-    }
-    saveMut.mutate(patch)
+  const loaded = settingsQuery.data
+  const licenses = licensesQuery.data ?? []
+  const filteredLicenses = licenses.filter((l) =>
+    l.toLowerCase().includes(licenseSearch.toLowerCase()),
+  )
+  const creds = working.authCredentials ?? {}
+  const credsDirty =
+    creds.user !== loaded?.authCredentials?.user ||
+    creds.password !== loaded?.authCredentials?.password
+
+  const setField = <K extends keyof ServerSettings>(key: K, value: ServerSettings[K]) =>
+    setWorking((cur) => (cur ? { ...cur, [key]: value } : cur))
+  const setCred = (patch: Partial<NonNullable<ServerSettings['authCredentials']>>) =>
+    setWorking((cur) => (cur ? { ...cur, authCredentials: { ...cur.authCredentials, ...patch } } : cur))
+
+  // Toggle + immediately persist a single boolean (old UI saves on change).
+  const toggle = (key: keyof ServerSettings, value: boolean) => {
+    setField(key, value as ServerSettings[typeof key])
+    save(key, { [key]: value } as Partial<ServerSettings>)
   }
 
-  const currentUser = settingsQuery.data?.authCredentials?.user ?? 'pi'
+  const resetBehaviors = () => {
+    setWorking((cur) => (cur ? { ...cur, ...DEFAULT_BEHAVIORS } : cur))
+    save('reset', { ...DEFAULT_BEHAVIORS })
+  }
 
   return (
-    <>
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h2 className="text-headline-lg text-text-vibrant">Settings</h2>
-          <p className="text-body-md text-text-muted mt-1">
-            Server-wide configuration. Saved values apply to every console session.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {dirty && (
-            <span className="text-body-sm text-status-syncing font-mono flex items-center gap-1">
-              <Icon name="edit" size={14} />
-              Unsaved changes
-            </span>
-          )}
-          {saveMut.isSuccess && !dirty && (
-            <span className="text-body-sm text-status-online font-mono flex items-center gap-1">
-              <Icon name="check" size={14} />
-              Saved
-            </span>
-          )}
-          <Button onClick={submit} disabled={!dirty || saveMut.isPending}>
-            <Icon name="save" size={18} />
-            {saveMut.isPending ? 'Saving…' : 'Save Settings'}
-          </Button>
-        </div>
-      </div>
+    <div className="space-y-8 max-w-container-max">
+      <header>
+        <h2 className="text-headline-lg text-text-vibrant">License &amp; Installation Settings</h2>
+        <p className="text-text-muted text-body-md mt-2">
+          Manage server licensing and configure system-wide playback behaviors.
+        </p>
+      </header>
 
       {saveMut.error != null && (
-        <Card className="p-3 flex items-center gap-2 border-status-offline/30 bg-status-offline/10">
+        <div className="p-3 flex items-center gap-2 rounded-xl border border-status-offline/30 bg-status-offline/10">
           <Icon name="error" className="text-status-offline" />
           <span className="text-body-sm text-text-vibrant">
             Save failed: {saveMut.error instanceof Error ? saveMut.error.message : 'Unknown error'}
           </span>
-        </Card>
+        </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        {/* Authentication */}
-        <Card className="p-5 xl:col-span-2 flex flex-col gap-4">
-          <SectionHeader
-            icon="lock"
-            title="Authentication"
-            description="HTTP Basic Auth credentials for the API. Changing these signs every browser session out."
-          />
-          <FieldLabel label="Current user">
-            <Input value={currentUser} disabled className="font-mono" />
-          </FieldLabel>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* Left column: primary configuration */}
+        <div className="lg:col-span-8 space-y-8">
+          {/* Section 1: License Management */}
+          <section className="bg-surface-container rounded-xl border border-border-industrial overflow-hidden">
+            <div className="px-6 py-4 bg-surface-container-high flex justify-between items-center border-b border-border-industrial">
+              <div className="flex items-center gap-3">
+                <Icon name="verified" className="text-primary" />
+                <h3 className="text-headline-sm text-text-vibrant">Available Licenses</h3>
+              </div>
+              <input
+                ref={fileRef}
+                type="file"
+                multiple
+                accept=".txt"
+                className="hidden"
+                onChange={(e) => {
+                  const files = Array.from(e.target.files ?? [])
+                  if (files.length) uploadMut.mutate(files)
+                  e.target.value = ''
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => fileRef.current?.click()}
+                disabled={uploadMut.isPending}
+                className="flex items-center gap-2 bg-primary text-on-primary font-bold px-4 py-1.5 rounded hover:brightness-110 transition-all disabled:opacity-50"
+              >
+                <Icon name="upload" size={16} />
+                <span className="text-label-caps uppercase">{uploadMut.isPending ? 'Uploading…' : 'Upload'}</span>
+              </button>
+            </div>
+            <div className="p-8 space-y-6">
+              {uploadMut.error != null && (
+                <p className="text-body-sm text-status-offline">
+                  Upload failed: {uploadMut.error instanceof Error ? uploadMut.error.message : 'Unknown error'}
+                </p>
+              )}
 
-          {creds === null ? (
-            <Button
-              variant="outline"
-              type="button"
-              onClick={() => setCreds({ user: currentUser, password: '', confirm: '' })}
-            >
-              <Icon name="key" size={16} />
-              Change credentials
-            </Button>
-          ) : (
-            <div className="flex flex-col gap-3 p-4 rounded-industrial border border-border-industrial bg-canvas-depth-1">
-              <FieldLabel label="New username">
-                <Input
-                  value={creds.user}
-                  onChange={(e) => setCreds({ ...creds, user: e.target.value })}
-                  autoComplete="username"
-                  className="font-mono"
-                />
-              </FieldLabel>
-              <FieldLabel label="New password">
-                <Input
-                  type="password"
-                  value={creds.password}
-                  onChange={(e) => setCreds({ ...creds, password: e.target.value })}
-                  autoComplete="new-password"
-                  placeholder="Leave blank to keep current password"
-                />
-              </FieldLabel>
-              {creds.password && (
-                <FieldLabel label="Confirm password">
-                  <Input
-                    type="password"
-                    value={creds.confirm}
-                    onChange={(e) => setCreds({ ...creds, confirm: e.target.value })}
-                    autoComplete="new-password"
-                  />
-                </FieldLabel>
+              {licenses.length === 0 ? (
+                <div className="p-4 border border-dashed border-border-industrial rounded-lg bg-surface-container-low/50 text-body-sm text-text-muted">
+                  Register the player ID at pisignage.com to generate license files, then upload
+                  them here (or save them from the registration email). Uploaded licenses are
+                  downloaded to players automatically.
+                </div>
+              ) : (
+                <>
+                  <div className="relative">
+                    <Icon
+                      name="filter_list"
+                      className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
+                      size={18}
+                    />
+                    <input
+                      type="text"
+                      value={licenseSearch}
+                      onChange={(e) => setLicenseSearch(e.target.value)}
+                      placeholder="Search licenses..."
+                      className={cn(inputCls, 'pl-10 py-3 font-body-md')}
+                    />
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-4 items-end">
+                    <label className="flex-1 w-full">
+                      <span className="block text-label-caps text-text-muted uppercase mb-2">License Pool</span>
+                      <div className="relative">
+                        <select
+                          value={selectedLicense}
+                          onChange={(e) => setSelectedLicense(e.target.value)}
+                          className={cn(inputCls, 'py-3 font-body-md appearance-none cursor-pointer pr-10')}
+                        >
+                          <option value="">Select a license</option>
+                          {filteredLicenses.map((l) => (
+                            <option key={l} value={l}>
+                              {l}
+                            </option>
+                          ))}
+                        </select>
+                        <Icon
+                          name="expand_more"
+                          size={20}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none"
+                        />
+                      </div>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => selectedLicense && deleteLicenseMut.mutate(selectedLicense)}
+                      disabled={!selectedLicense || deleteLicenseMut.isPending}
+                      className="bg-error/10 text-error font-bold px-6 py-3 rounded-lg hover:bg-error/20 transition-all border border-error/30 uppercase text-[12px] tracking-wider disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {deleteLicenseMut.isPending ? 'Deleting…' : 'Delete License'}
+                    </button>
+                  </div>
+                </>
               )}
-              {credsError && (
-                <p className="text-body-sm text-status-offline" role="alert">
-                  {credsError}
-                </p>
-              )}
-              <div className="flex gap-2 items-center">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setCreds(null)
-                    setCredsError(null)
-                  }}
-                >
-                  Cancel
-                </Button>
-                <p className="text-body-sm text-text-muted">
-                  Save below to apply. You will be signed out.
-                </p>
+
+              <div className="p-4 border border-border-industrial border-dashed rounded-lg bg-surface-container-low/50">
+                <div className="flex items-start gap-4">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                    <Icon name="info" />
+                  </div>
+                  <div>
+                    <h4 className="text-body-md font-bold text-on-surface">License Summary</h4>
+                    <p className="text-body-sm text-text-muted mt-1">
+                      {licenses.length === 0
+                        ? 'No license files are currently registered on this server.'
+                        : `You currently have ${licenses.length} license file${licenses.length === 1 ? '' : 's'} registered on this server.`}
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
-          )}
-        </Card>
+          </section>
 
-        {/* Branding / locale */}
-        <Card className="p-5 flex flex-col gap-4">
-          <SectionHeader icon="palette" title="General" />
-          <FieldLabel label="Language">
-            <NativeSelect
-              value={working.language ?? 'en'}
-              onChange={(v) => setWorking({ ...working, language: v })}
-              options={[
-                { value: 'en', label: 'English' },
-                { value: 'es', label: 'Español' },
-                { value: 'fr', label: 'Français' },
-                { value: 'de', label: 'Deutsch' },
-                { value: 'pt', label: 'Português' },
-                { value: 'zh', label: '中文' },
-                { value: 'ja', label: '日本語' },
-              ]}
-            />
-          </FieldLabel>
-          <FieldLabel label="Logo (asset filename)">
-            <Input
-              value={working.logo ?? ''}
-              onChange={(e) => setWorking({ ...working, logo: e.target.value })}
-              placeholder="e.g. company_logo.png"
-              className="font-mono"
-            />
-          </FieldLabel>
-          <ToggleRow
-            label="Hide welcome notice"
-            description="Skip the splash on the legacy AngularJS UI."
-            checked={!!working.hideWelcomeNotice}
-            onChange={(v) => setWorking({ ...working, hideWelcomeNotice: v })}
-          />
-        </Card>
+          {/* Section 2: Installation Settings */}
+          <section className="bg-surface-container rounded-xl border border-border-industrial overflow-hidden">
+            <div className="px-6 py-4 bg-surface-container-high border-b border-border-industrial flex items-center gap-3">
+              <Icon name="settings_system_daydream" className="text-primary" />
+              <h3 className="text-headline-sm text-text-vibrant">Installation Settings</h3>
+            </div>
+            <div className="p-8 space-y-10">
+              {/* Single-field rows */}
+              <div className="space-y-6">
+                <FieldRow
+                  label="Username at pisignage.com"
+                  dirty={working.installation !== loaded?.installation}
+                  saving={savingKey === 'installation'}
+                  saved={savedKey === 'installation'}
+                  onSave={() => save('installation', { installation: working.installation })}
+                  note="Changing this restarts the server."
+                >
+                  <input
+                    type="text"
+                    value={working.installation ?? ''}
+                    onChange={(e) => setField('installation', e.target.value)}
+                    className={inputCls}
+                  />
+                </FieldRow>
 
-        {/* Player defaults */}
-        <Card className="p-5 flex flex-col gap-4 xl:col-span-2">
-          <SectionHeader
-            icon="monitor"
-            title="Player Defaults"
-            description="Applied to every player that registers. Existing players keep their current values until they next sync."
-          />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <FieldLabel label="Default asset duration (sec)">
-              <Input
-                type="number"
-                min={1}
-                max={600}
-                value={working.defaultDuration ?? 10}
-                onChange={(e) =>
-                  setWorking({ ...working, defaultDuration: Number(e.target.value) })
-                }
-                className="font-mono"
-              />
-            </FieldLabel>
-            <FieldLabel label="Status report interval (min)">
-              <Input
-                type="number"
-                min={1}
-                max={60}
-                value={working.reportIntervalMinutes ?? 5}
-                onChange={(e) =>
-                  setWorking({
-                    ...working,
-                    reportIntervalMinutes: Number(e.target.value),
-                  })
-                }
-                className="font-mono"
-              />
-            </FieldLabel>
-            <FieldLabel label="SSH password (Pi default: pi)">
-              <Input
-                type="password"
-                value={working.sshPassword ?? ''}
-                onChange={(e) => setWorking({ ...working, sshPassword: e.target.value })}
-                placeholder="••••••"
-                autoComplete="off"
-              />
-            </FieldLabel>
-          </div>
-          <ToggleRow
-            label="Enable YouTube downloads"
-            description="Allow assets sourced from YouTube URLs. Requires youtube-dl on the server."
-            checked={!!working.enableYoutubeDl}
-            onChange={(v) => setWorking({ ...working, enableYoutubeDl: v })}
-          />
-        </Card>
+                <FieldRow
+                  label="SSH Password"
+                  dirty={(working.sshPassword ?? '') !== (loaded?.sshPassword ?? '')}
+                  saving={savingKey === 'sshPassword'}
+                  saved={savedKey === 'sshPassword'}
+                  onSave={() => save('sshPassword', { sshPassword: working.sshPassword })}
+                >
+                  <input
+                    type="password"
+                    value={working.sshPassword ?? ''}
+                    onChange={(e) => setField('sshPassword', e.target.value)}
+                    placeholder="••••••••"
+                    autoComplete="off"
+                    className={inputCls}
+                  />
+                </FieldRow>
 
-        {/* Server info (read-only) */}
-        <Card className="p-5 flex flex-col gap-3">
-          <SectionHeader
-            icon="dns"
-            title="Server Info"
-            description="Read-only. Surfaced from /api/serverconfig."
-          />
-          {serverInfoQuery.isLoading ? (
-            <p className="text-body-sm text-text-muted">Loading…</p>
-          ) : serverInfoQuery.isError ? (
-            <p className="text-body-sm text-text-muted">Not available on this server.</p>
-          ) : (
-            <dl className="space-y-2 font-mono text-data-mono">
-              <InfoRow
-                label="Installation"
-                value={serverInfoQuery.data?.installation ?? working.installation}
+                <FieldRow
+                  label="Default Duration for Slides"
+                  dirty={working.defaultDuration !== loaded?.defaultDuration}
+                  saving={savingKey === 'defaultDuration'}
+                  saved={savedKey === 'defaultDuration'}
+                  onSave={() => save('defaultDuration', { defaultDuration: working.defaultDuration })}
+                >
+                  <UnitInput
+                    value={working.defaultDuration ?? 10}
+                    onChange={(v) => setField('defaultDuration', v)}
+                    unit="seconds"
+                  />
+                </FieldRow>
+
+                <FieldRow
+                  label="Player reporting interval"
+                  dirty={working.reportIntervalMinutes !== loaded?.reportIntervalMinutes}
+                  saving={savingKey === 'reportIntervalMinutes'}
+                  saved={savedKey === 'reportIntervalMinutes'}
+                  onSave={() =>
+                    save('reportIntervalMinutes', { reportIntervalMinutes: working.reportIntervalMinutes })
+                  }
+                >
+                  <UnitInput
+                    value={working.reportIntervalMinutes ?? 5}
+                    onChange={(v) => setField('reportIntervalMinutes', v)}
+                    unit="minutes"
+                  />
+                </FieldRow>
+              </div>
+
+              {/* Download Access */}
+              <div className="pt-8 border-t border-border-industrial">
+                <h4 className="text-label-caps text-text-muted uppercase mb-6 flex items-center gap-2">
+                  <Icon name="download" size={16} />
+                  Download Access
+                </h4>
+                <div className="p-6 rounded-lg border border-border-industrial bg-surface-container-low/30 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <label className="flex flex-col gap-2">
+                      <span className="text-body-sm text-text-muted font-semibold uppercase tracking-wider">Username</span>
+                      <input
+                        type="text"
+                        value={creds.user ?? ''}
+                        onChange={(e) => setCred({ user: e.target.value })}
+                        autoComplete="username"
+                        className={inputCls}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="text-body-sm text-text-muted font-semibold uppercase tracking-wider">Password</span>
+                      <input
+                        type="password"
+                        value={creds.password ?? ''}
+                        onChange={(e) => setCred({ password: e.target.value })}
+                        autoComplete="new-password"
+                        placeholder="••••••••"
+                        className={inputCls}
+                      />
+                    </label>
+                  </div>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-1">
+                    <p className="text-body-sm text-text-muted">
+                      These credentials also secure this console — saving updates your current session.
+                    </p>
+                    <SaveButton
+                      label="Save Download Access"
+                      wide
+                      dirty={credsDirty}
+                      saving={savingKey === 'authCredentials'}
+                      saved={savedKey === 'authCredentials'}
+                      onClick={() =>
+                        save('authCredentials', {
+                          authCredentials: { user: creds.user, password: creds.password },
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        {/* Right column: behaviors & advanced */}
+        <div className="lg:col-span-4 space-y-8">
+          {/* System Behaviors */}
+          <section className="bg-surface-container rounded-xl border border-border-industrial overflow-hidden">
+            <div className="px-6 py-4 bg-surface-container-high border-b border-border-industrial flex items-center gap-3">
+              <Icon name="dynamic_form" className="text-primary" />
+              <h3 className="text-headline-sm text-text-vibrant">System Behaviors</h3>
+            </div>
+            <div className="p-6 space-y-2">
+              <CheckItem
+                checked={!!working.enableYoutubeDl}
+                onChange={(v) => toggle('enableYoutubeDl', v)}
+                label="Use youtube-dl program for livestreaming instead of livestreamer"
               />
-              <InfoRow
-                label="IP"
-                value={serverInfoQuery.data?.serverIp ?? serverInfoQuery.data?.ip}
+              <CheckItem
+                checked={!!working.forceTvOn}
+                onChange={(v) => toggle('forceTvOn', v)}
+                label="Keep TV on by sending CEC tv-on/off message every 3 minutes"
               />
-              <InfoRow label="Version" value={serverInfoQuery.data?.gitVersion} />
-            </dl>
-          )}
-        </Card>
+              <CheckItem
+                checked={!!working.disableCECPowerCheck}
+                onChange={(v) => toggle('disableCECPowerCheck', v)}
+                label="Disable CEC power check of TV every 3 minutes"
+              />
+              <CheckItem
+                checked={!!working.systemMessagesHide}
+                onChange={(v) => toggle('systemMessagesHide', v)}
+                label="Hide system messages on TV Screen (e.g. Download in Progress)"
+              />
+              <CheckItem
+                checked={!!working.hideWelcomeNotice}
+                onChange={(v) => toggle('hideWelcomeNotice', v)}
+                label="Do not show startup welcome screen & skip network diagnostics"
+              />
+            </div>
+          </section>
+
+          {/* Advanced Config */}
+          <section className="bg-surface-container rounded-xl border border-border-industrial overflow-hidden">
+            <div className="px-6 py-4 bg-surface-container-high border-b border-border-industrial flex items-center gap-3">
+              <Icon name="warning" className="text-error" />
+              <h3 className="text-headline-sm text-text-vibrant">Advanced Config</h3>
+            </div>
+            <div className="p-6">
+              <label className="p-5 rounded-lg bg-error-container/5 border border-error/20 flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!working.enableLog}
+                  onChange={(e) => toggle('enableLog', e.target.checked)}
+                  className="mt-0.5 w-5 h-5 shrink-0 rounded border-border-industrial bg-surface-container-low text-error focus:ring-0"
+                />
+                <div>
+                  <p className="text-body-md text-on-surface font-bold">Enable file play logs</p>
+                  <p className="text-body-sm text-error/80 mt-1 leading-relaxed">
+                    Network intensive. Do not enable unless required for auditing. High throughput
+                    may impact player performance.
+                  </p>
+                </div>
+              </label>
+              <button
+                type="button"
+                onClick={resetBehaviors}
+                disabled={savingKey === 'reset'}
+                className="mt-6 w-full bg-surface-container-highest text-on-surface font-bold py-3 rounded-lg text-body-md hover:bg-surface-variant transition-all border border-border-industrial uppercase text-[12px] tracking-wider disabled:opacity-50"
+              >
+                {savingKey === 'reset' ? 'Resetting…' : 'Reset to Default Behaviors'}
+              </button>
+            </div>
+          </section>
+        </div>
       </div>
-    </>
-  )
-}
 
-function stripCreds(s: ServerSettings): ServerSettings {
-  // The form never edits the password via the working copy — it goes through
-  // the dedicated creds dialog. Exclude it from dirty comparison so changing
-  // other fields doesn't accidentally try to overwrite the password.
-  const { authCredentials: _drop, ...rest } = s
-  void _drop
-  return rest
-}
-
-function SectionHeader({
-  icon,
-  title,
-  description,
-}: {
-  icon: string
-  title: string
-  description?: string
-}) {
-  return (
-    <header>
-      <h3 className="text-headline-sm text-text-vibrant flex items-center gap-2">
-        <Icon name={icon} className="text-primary" size={20} />
-        {title}
-      </h3>
-      {description && <p className="text-body-sm text-text-muted mt-1">{description}</p>}
-    </header>
-  )
-}
-
-function FieldLabel({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-label-caps text-text-muted uppercase">{label}</span>
-      {children}
-    </label>
-  )
-}
-
-function ToggleRow({
-  label,
-  description,
-  checked,
-  onChange,
-}: {
-  label: string
-  description?: string
-  checked: boolean
-  onChange: (v: boolean) => void
-}) {
-  return (
-    <div className="flex items-start justify-between gap-3">
-      <div>
-        <p className="text-body-md text-text-vibrant">{label}</p>
-        {description && <p className="text-body-sm text-text-muted">{description}</p>}
+      {/* Server info (real values, read-only) */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <StatCard
+          icon="dns"
+          tone="primary"
+          label="Installation"
+          value={String(serverInfoQuery.data?.installation ?? working.installation ?? '—')}
+        />
+        <StatCard
+          icon="lan"
+          tone="tertiary"
+          label="Server IP"
+          value={String(serverInfoQuery.data?.serverIp ?? serverInfoQuery.data?.ip ?? '—')}
+        />
+        <StatCard
+          icon="commit"
+          tone="secondary"
+          label="Version"
+          value={String((serverInfoQuery.data?.version as string) ?? serverInfoQuery.data?.gitVersion ?? '—')}
+        />
       </div>
-      <Switch checked={checked} onCheckedChange={onChange} />
     </div>
   )
 }
 
-function NativeSelect<T extends string>({
+function StatCard({
+  icon,
+  label,
+  value,
+  tone,
+}: {
+  icon: string
+  label: string
+  value: string
+  tone: 'primary' | 'tertiary' | 'secondary'
+}) {
+  const tones = {
+    primary: 'bg-primary/10 text-primary',
+    tertiary: 'bg-tertiary/10 text-tertiary',
+    secondary: 'bg-secondary/10 text-secondary',
+  }
+  return (
+    <div className="p-6 bg-surface-container rounded-xl border border-border-industrial flex items-center gap-4">
+      <div className={cn('w-12 h-12 rounded-lg flex items-center justify-center', tones[tone])}>
+        <Icon name={icon} size={28} />
+      </div>
+      <div className="min-w-0">
+        <p className="text-label-caps text-text-muted uppercase">{label}</p>
+        <p className="font-data-mono text-headline-sm text-text-vibrant truncate">{value}</p>
+      </div>
+    </div>
+  )
+}
+
+function FieldRow({
+  label,
+  note,
+  dirty,
+  saving,
+  saved,
+  onSave,
+  children,
+}: {
+  label: string
+  note?: string
+  dirty: boolean
+  saving: boolean
+  saved: boolean
+  onSave: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex flex-col md:flex-row md:items-start gap-4">
+      <label className="md:w-64 md:pt-2.5 text-body-md text-on-surface font-semibold shrink-0">{label}</label>
+      <div className="flex-1 w-full">
+        <div className="flex gap-2">
+          <div className="flex-1">{children}</div>
+          <SaveButton dirty={dirty} saving={saving} saved={saved} onClick={onSave} />
+        </div>
+        {note && <p className="text-body-sm text-text-muted mt-1.5">{note}</p>}
+      </div>
+    </div>
+  )
+}
+
+function SaveButton({
+  label = 'Save',
+  dirty,
+  saving,
+  saved,
+  onClick,
+  wide,
+}: {
+  label?: string
+  dirty: boolean
+  saving: boolean
+  saved: boolean
+  onClick: () => void
+  wide?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!dirty || saving}
+      className={cn(
+        'font-bold rounded-lg uppercase text-[12px] tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0 min-w-[80px]',
+        wide ? 'px-10 py-3' : 'px-6 py-2.5',
+        saved
+          ? 'bg-status-online text-on-primary'
+          : 'bg-tertiary-container text-on-tertiary-container hover:brightness-110',
+      )}
+    >
+      {saving ? 'Saving…' : saved ? 'Saved' : label}
+    </button>
+  )
+}
+
+function UnitInput({
   value,
   onChange,
-  options,
+  unit,
 }: {
-  value: T
-  onChange: (v: T) => void
-  options: { value: T; label: string }[]
+  value: number
+  onChange: (v: number) => void
+  unit: string
 }) {
   return (
     <div className="relative">
-      <select
+      <input
+        type="number"
         value={value}
-        onChange={(e) => onChange(e.target.value as T)}
-        className="appearance-none h-9 w-full bg-canvas-depth-1 border border-border-industrial rounded-industrial pl-3 pr-9 text-body-md text-text-vibrant focus:outline-none focus:border-primary"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      <Icon
-        name="arrow_drop_down"
-        size={20}
-        className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none"
+        onChange={(e) => onChange(Number(e.target.value))}
+        className={cn(inputCls, 'pr-20')}
       />
+      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-text-muted text-body-sm">
+        {unit}
+      </span>
     </div>
   )
 }
 
-function InfoRow({ label, value }: { label: string; value?: unknown }) {
-  const display =
-    value === undefined || value === null || value === ''
-      ? '—'
-      : typeof value === 'string'
-      ? value
-      : JSON.stringify(value)
+function CheckItem({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label: string
+}) {
   return (
-    <div className="flex justify-between gap-2">
-      <dt className="text-text-muted">{label}</dt>
-      <dd className="text-text-vibrant truncate">{display}</dd>
-    </div>
+    <label className="flex items-start gap-4 p-3 rounded-lg hover:bg-surface-container-high transition-colors cursor-pointer group">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 w-5 h-5 shrink-0 rounded border-border-industrial bg-surface-container-low text-primary focus:ring-0"
+      />
+      <span className="text-body-md text-on-surface group-hover:text-primary transition-colors leading-snug">
+        {label}
+      </span>
+    </label>
   )
 }

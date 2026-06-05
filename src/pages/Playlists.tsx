@@ -95,7 +95,12 @@ export function Playlists() {
 
       <AlertDialog
         open={deleteTarget !== null}
-        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        onOpenChange={(o) => {
+          if (!o) {
+            setDeleteTarget(null)
+            deleteMut.reset()
+          }
+        }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -105,13 +110,24 @@ export function Playlists() {
               their cached copy until they next sync from their assigned group.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteMut.error != null && (
+            <p className="text-body-sm text-status-offline" role="alert">
+              {deleteMut.error instanceof Error ? deleteMut.error.message : 'Failed to delete playlist'}
+            </p>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               destructive
-              onClick={() => deleteTarget && deleteMut.mutate(deleteTarget.name)}
+              disabled={deleteMut.isPending}
+              onClick={(e) => {
+                // Keep the dialog open so a failure stays visible; success closes
+                // it via the deleteTarget state in deleteMut.onSuccess.
+                e.preventDefault()
+                if (deleteTarget) deleteMut.mutate(deleteTarget.name)
+              }}
             >
-              Delete
+              {deleteMut.isPending ? 'Deleting…' : 'Delete'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

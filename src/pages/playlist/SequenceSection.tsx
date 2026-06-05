@@ -22,7 +22,7 @@ import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Icon } from '@/components/Icon'
 import { cn } from '@/lib/utils'
-import { assetName, assetThumbnailUrl, fetchAssets, inferType, type Asset, type AssetType } from '@/lib/assets'
+import { assetName, assetThumbnailUrl, fetchAssets, formatBytes, inferType, type Asset, type AssetType } from '@/lib/assets'
 import { findLayout, type LayoutZone } from '@/lib/layouts'
 import {
   formatDuration,
@@ -53,6 +53,23 @@ const DEFAULT_DURATION: Record<AssetType, number> = {
   other: 10,
 }
 
+/**
+ * Duration to give an asset when it's dropped onto the timeline.
+ *
+ * Video/audio: use the asset's known length (rounded) so the timeline reflects
+ * the real clip; fall back to 0 = "play the full clip" (resolved by the player)
+ * when no duration metadata is available — never a fixed 10s. Image/HTML/link
+ * keep their fixed defaults.
+ */
+function defaultDurationFor(asset: Asset): number {
+  const type = inferType(asset)
+  if (type === 'video' || type === 'audio') {
+    const known = Math.round(Number(asset.duration))
+    return known > 0 ? known : 0
+  }
+  return DEFAULT_DURATION[type] ?? 10
+}
+
 export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
   const layout = findLayout(playlist.layout)
   const zones = layout.zones
@@ -64,11 +81,13 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
 
   const libraryAssets = useMemo(() => {
     const term = search.trim().toLowerCase()
-    return (assetsQuery.data ?? []).filter((a) => {
+    const list = (assetsQuery.data ?? []).filter((a) => {
       if (typeFilter !== 'all' && inferType(a) !== typeFilter) return false
       if (term && !assetName(a).toLowerCase().includes(term)) return false
       return true
     })
+    // Last added first (newest at the top). Stable for items without a timestamp.
+    return [...list].sort((a, b) => assetTime(b) - assetTime(a))
   }, [assetsQuery.data, search, typeFilter])
 
   const zoneAssets = useMemo(
@@ -99,7 +118,7 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
       if (!fname) return
       const newAsset: PlaylistAsset = {
         filename: fname,
-        duration: DEFAULT_DURATION[inferType(file)] || 10,
+        duration: defaultDurationFor(file),
         selected: true,
         fullscreen: false,
         option: { zone: activeZone },
@@ -191,13 +210,13 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
               </button>
             ))}
           </div>
-          <div className="overflow-y-auto -mx-1 px-1 grid grid-cols-2 gap-2 min-h-0">
+          <div className="overflow-y-auto -mx-1 px-1 space-y-1 min-h-0">
             {assetsQuery.isLoading ? (
-              <p className="col-span-2 text-body-sm text-text-muted text-center py-6">
+              <p className="text-body-sm text-text-muted text-center py-6">
                 Loading assets…
               </p>
             ) : libraryAssets.length === 0 ? (
-              <p className="col-span-2 text-body-sm text-text-muted text-center py-6">
+              <p className="text-body-sm text-text-muted text-center py-6">
                 No assets match.
               </p>
             ) : (
@@ -278,35 +297,62 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
 function LibraryItem({ asset }: { asset: Asset }) {
   const type = inferType(asset)
   const name = assetName(asset)
+  const thumb = assetThumbnailUrl(asset)
+  const meta = assetMeta(asset, type)
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `lib:${name}`,
     data: { source: 'library', asset, label: name },
   })
 
   return (
-    <button
-      type="button"
+    <div
       ref={setNodeRef}
       {...listeners}
       {...attributes}
+      title={name}
       className={cn(
-        'group text-left rounded-industrial overflow-hidden border border-border-industrial hover:border-primary/50 bg-surface-container-low transition-colors',
+        'group flex items-center gap-2 p-1.5 rounded border border-transparent hover:border-outline-variant hover:bg-surface-bright cursor-grab active:cursor-grabbing transition-colors',
         isDragging && 'opacity-30',
       )}
     >
-      <div className="aspect-video bg-surface-container relative flex items-center justify-center">
-        {assetThumbnailUrl(asset) ? (
-          <img src={assetThumbnailUrl(asset)!} alt={name} className="w-full h-full object-cover" />
+      <Icon
+        name="drag_indicator"
+        size={16}
+        className="text-text-muted opacity-40 group-hover:opacity-100 shrink-0"
+      />
+      <div className="w-9 h-9 rounded overflow-hidden bg-black border border-border-industrial shrink-0 flex items-center justify-center">
+        {thumb ? (
+          <img src={thumb} alt={name} loading="lazy" className="w-full h-full object-cover opacity-80" />
         ) : (
-          <Icon name={iconFor(type)} size={28} className="opacity-50 text-text-muted" />
+          <Icon name={iconFor(type)} size={16} className="text-text-muted opacity-60" />
         )}
-        <span className="absolute top-1 right-1 bg-surface/80 backdrop-blur p-0.5 rounded">
-          <Icon name={iconFor(type)} size={12} className="text-primary" />
-        </span>
       </div>
-      <p className="px-2 py-1.5 text-body-sm text-text-vibrant truncate">{name}</p>
-    </button>
+      <div className="flex-1 min-w-0">
+        <p className="text-body-sm text-on-surface truncate">{name}</p>
+        {meta && <p className="font-mono text-[9px] text-text-muted">{meta}</p>}
+      </div>
+    </div>
   )
+}
+
+/** Compact metadata line: duration (a/v) or resolution (image), then size. */
+function assetMeta(asset: Asset, type: AssetType): string {
+  const parts: string[] = []
+  const dur = Number(asset.duration)
+  if ((type === 'video' || type === 'audio') && dur > 0) parts.push(formatDuration(dur))
+  const w = asset.resolution?.width
+  const h = asset.resolution?.height
+  if (type === 'image' && w && h) parts.push(`${w}x${h}`)
+  const size = formatBytes(asset.size)
+  if (size) parts.push(size)
+  return parts.join(' • ')
+}
+
+/** Timestamp for "newest first" sorting; 0 when no usable date is present. */
+function assetTime(a: Asset): number {
+  const v = a.ctime ?? a.createdAt ?? a.mtime
+  const t = v ? new Date(v).getTime() : NaN
+  return isNaN(t) ? 0 : t
 }
 
 function iconFor(type: AssetType): string {

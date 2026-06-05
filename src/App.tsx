@@ -15,6 +15,7 @@ import { Login } from '@/pages/Login'
 import { Players } from '@/pages/Players'
 import { PlaylistEditor } from '@/pages/PlaylistEditor'
 import { Playlists } from '@/pages/Playlists'
+import { SelfHosted } from '@/pages/SelfHosted'
 import { Settings } from '@/pages/Settings'
 import { loadAuthHeader } from '@/lib/auth'
 import { registerUnauthorizedHandler } from '@/lib/api'
@@ -59,6 +60,7 @@ function App() {
             <Route path="playlists" element={<Playlists />} />
             <Route path="playlists/:name" element={<PlaylistEditor />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="self-hosted" element={<SelfHosted />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

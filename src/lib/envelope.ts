@@ -42,6 +42,22 @@ export function unwrapArray<T = unknown>(body: unknown): T[] {
   return []
 }
 
+/**
+ * Throw if the response envelope reports a failure.
+ *
+ * pisignage's restware.sendError replies with HTTP 200 and a
+ * `{ success: false, stat_message }` body, so axios resolves even when the
+ * operation failed server-side. Call this on `res.data` before trusting a
+ * write so the failure surfaces as a thrown error (which React Query maps to
+ * the mutation's error state). The reason is taken from `stat_message`.
+ */
+export function assertSuccess(body: unknown, fallback = 'Request failed'): void {
+  if (body && typeof body === 'object' && (body as { success?: boolean }).success === false) {
+    const msg = (body as { stat_message?: string }).stat_message
+    throw new Error(typeof msg === 'string' && msg.trim() ? msg.trim() : fallback)
+  }
+}
+
 /** Pull an object body out of any of the envelope shapes above. */
 export function unwrapObject<T extends object>(body: unknown, fallback: T): T {
   if (body == null) return fallback

@@ -11,21 +11,44 @@ export type Player = {
   group?: { _id?: string; name?: string } | string
   cpuSerialNumber: string
   myIpAddress?: string
+  ip?: string
   currentPlaylist?: string
   isConnected: boolean
+  syncInProgress?: boolean
   version?: string
+  platform_version?: string
+  ethMac?: string
+  wifiMac?: string
+  uptime?: string
+  piTemperature?: string
+  diskSpaceUsed?: string
+  diskSpaceAvailable?: string
+  tvStatus?: boolean
   labels?: string[]
   licensed?: boolean
   lastReported?: string
   createdAt?: string
 }
 
+/** Shell command result returned by the player (via POST /api/pishell). */
+export type ShellResult = { err?: string; stdout?: string; stderr?: string }
+
 import { api } from './api'
-import { unwrapArray } from './envelope'
+import { assertSuccess, unwrapArray } from './envelope'
 
 export async function fetchPlayers(): Promise<Player[]> {
   const res = await api.get('/players')
   return unwrapArray<Player>(res.data)
+}
+
+/**
+ * Update a player record. The server (POST /api/players/:id) merges the patch
+ * and re-pushes config to the device. Use `{ name }` to rename and
+ * `{ group: { _id, name } }` to move the player to another group.
+ */
+export async function updatePlayer(playerId: string, patch: Partial<Player>): Promise<void> {
+  const res = await api.post(`/players/${encodeURIComponent(playerId)}`, patch)
+  assertSuccess(res.data, 'Failed to update player')
 }
 
 /** Resolve a Player.group field (either populated object or raw ObjectId string) to a name. */
@@ -50,9 +73,53 @@ export async function requestSnapshot(playerId: string) {
   await api.post(`/snapshot/${encodeURIComponent(playerId)}`)
 }
 
-/** Run a shell command on the player. The result returns via socket `shell_ack`. */
-export async function runShell(playerId: string, command: string) {
-  await api.post(`/pishell/${encodeURIComponent(playerId)}`, { cmd: command })
+/**
+ * Run a shell command on the player and return its output.
+ *
+ * The server holds the HTTP response open until the player replies over its
+ * socket (server-side `shellAck`), then returns `{ data: { err, stdout, stderr } }`
+ * — or `{ data: { err: 'Request Timeout…' } }` after 60s if the player is offline.
+ */
+export async function runShell(playerId: string, command: string): Promise<ShellResult> {
+  const res = await api.post(`/pishell/${encodeURIComponent(playerId)}`, { cmd: command })
+  const d = ((res.data as { data?: unknown })?.data ?? {}) as Record<string, unknown>
+
+  // On a non-zero exit the player sends the Node exec error OBJECT as `err`
+  // (e.g. { code, killed, signal, cmd, stdout, stderr }). Coerce everything to
+  // strings so callers/React never receive an object, and lift the error
+  // object's streams up so real output still shows.
+  const errObj = d.err && typeof d.err === 'object' ? (d.err as Record<string, unknown>) : null
+  const err = errObj
+    ? `Command failed${errObj.code != null ? ` (exit ${asText(errObj.code)})` : ''}`
+    : asText(d.err)
+  return {
+    err: err || undefined,
+    stdout: asText(d.stdout) || asText(errObj?.stdout) || undefined,
+    stderr: asText(d.stderr) || asText(errObj?.stderr) || undefined,
+  }
+}
+
+/** Coerce any value (string, object, number, null) to a displayable string. */
+function asText(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  if (typeof v === 'object') {
+    try {
+      return JSON.stringify(v, null, 2)
+    } catch {
+      return String(v)
+    }
+  }
+  return String(v)
+}
+
+/**
+ * Turn the player's TV/display on or off via CEC. The server's tvPower handler
+ * sends `{ off: status }` to the player, so `off=false` powers the TV ON and
+ * `off=true` powers it OFF. Takes ~10s to take effect on the device.
+ */
+export async function setTvPower(playerId: string, off: boolean) {
+  await api.post(`/pitv/${encodeURIComponent(playerId)}`, { status: off })
 }
 
 /** Trigger pisignage-player firmware/software update. */

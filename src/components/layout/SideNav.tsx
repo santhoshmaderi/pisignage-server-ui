@@ -1,7 +1,9 @@
-import { NavLink } from 'react-router-dom'
+import { useState } from 'react'
+import { Link, NavLink } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { Icon } from '@/components/Icon'
 import { Button } from '@/components/ui/button'
+import { DeployContentDialog } from '@/components/DeployContentDialog'
 
 type NavItem = { to: string; icon: string; label: string }
 
@@ -22,6 +24,7 @@ export type SideNavProps = {
 }
 
 export function SideNav({ username }: SideNavProps) {
+  const [deployOpen, setDeployOpen] = useState(false)
   return (
     <nav className="bg-surface-container w-60 h-screen fixed left-0 top-0 border-r border-border-industrial flex flex-col py-6 z-50">
       <div className="px-6 mb-8 flex items-center gap-3">
@@ -66,7 +69,25 @@ export function SideNav({ username }: SideNavProps) {
       </ul>
 
       <div className="px-6 mt-auto flex flex-col gap-4">
-        <Button size="default" className="w-full">
+        <Link
+          to="/self-hosted"
+          className="block bg-surface-container-high border border-border-industrial rounded-lg p-4 space-y-2 hover:border-primary/50 transition-colors"
+        >
+          <div className="flex items-center gap-2 text-primary">
+            <Icon name="dns" size={18} />
+            <span className="text-label-caps uppercase tracking-wider">Self-Hosted Server</span>
+          </div>
+          <p className="text-body-sm text-text-muted">
+          Level up your signage — Multi-user Management, Branding, SSO, ready-to-go
+          Templates, etc., all in one place
+          </p>
+          <span className="inline-flex items-center gap-1 text-body-sm text-primary">
+            Learn More
+            <Icon name="arrow_forward" size={14} />
+          </span>
+        </Link>
+
+        <Button size="default" className="w-full" onClick={() => setDeployOpen(true)}>
           <Icon name="send" size={18} />
           Deploy Content
         </Button>
@@ -92,6 +113,8 @@ export function SideNav({ username }: SideNavProps) {
           ))}
         </ul>
       </div>
+
+      <DeployContentDialog open={deployOpen} onOpenChange={setDeployOpen} />
     </nav>
   )
 }

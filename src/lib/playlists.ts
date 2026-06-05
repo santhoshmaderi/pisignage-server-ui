@@ -1,5 +1,5 @@
 import { api } from './api'
-import { unwrapArray, unwrapObject } from './envelope'
+import { assertSuccess, unwrapArray, unwrapObject } from './envelope'
 
 /**
  * Playlist file as stored by pisignage-server.
@@ -97,16 +97,22 @@ export async function fetchPlaylist(name: string): Promise<Playlist> {
 }
 
 export async function createPlaylist(name: string): Promise<void> {
-  await api.post('/playlists', { name })
+  // The server's createPlaylist reads the name from `req.body.file` (not `name`).
+  const res = await api.post('/playlists', { file: name })
+  assertSuccess(res.data, 'Failed to create playlist')
 }
 
 export async function savePlaylist(playlist: Playlist): Promise<Playlist> {
   const res = await api.put(`/playlists/${encodeURIComponent(playlist.name)}`, playlist)
+  assertSuccess(res.data, 'Failed to save playlist')
   return withDefaults(unwrapObject<Playlist>(res.data, playlist))
 }
 
 export async function deletePlaylist(name: string): Promise<void> {
-  await api.delete(`/playlists/${encodeURIComponent(name)}`)
+  // There is no DELETE /api/playlists route. Playlists are stored as files named
+  // `__<name>.json`, so (like the old UI) we delete via the files API.
+  const res = await api.delete(`/files/${encodeURIComponent(`__${name}.json`)}`)
+  assertSuccess(res.data, 'Failed to delete playlist')
 }
 
 /** Fill in safe defaults so the UI never has to null-check deep paths. */

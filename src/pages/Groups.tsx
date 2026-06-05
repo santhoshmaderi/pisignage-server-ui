@@ -34,12 +34,14 @@ import { Icon } from '@/components/Icon'
 import {
   createGroup,
   deleteGroup,
+  deployGroup,
   fetchGroups,
   playlistRefName,
   updateGroup,
   type Group,
 } from '@/lib/groups'
 import { fetchPlayers, playerGroupId } from '@/lib/players'
+import { GroupDetail } from './GroupDetail'
 
 export function Groups() {
   const queryClient = useQueryClient()
@@ -49,8 +51,19 @@ export function Groups() {
   const [createOpen, setCreateOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<Group | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Group | null>(null)
+  const [deployTarget, setDeployTarget] = useState<Group | null>(null)
+  const [openGroup, setOpenGroup] = useState<Group | null>(null)
 
   const invalidateGroups = () => queryClient.invalidateQueries({ queryKey: ['groups'] })
+
+  // `openGroup` is just a selection snapshot; always render the detail view from
+  // the freshest group in the query cache so saves (ticker, settings, playlists)
+  // are reflected when a dialog re-seeds. Falls back to the snapshot if the group
+  // momentarily isn't in the list (e.g. mid-refetch).
+  const liveOpenGroup = useMemo(
+    () => (openGroup ? (groupsQuery.data?.find((g) => g._id === openGroup._id) ?? openGroup) : null),
+    [openGroup, groupsQuery.data],
+  )
 
   const memberCountByGroupId = useMemo(() => {
     const map = new Map<string, number>()
@@ -86,6 +99,15 @@ export function Groups() {
     },
   })
 
+  const deployMut = useMutation({
+    mutationFn: (id: string) => deployGroup(id),
+    onSuccess: () => {
+      invalidateGroups()
+      queryClient.invalidateQueries({ queryKey: ['players'] })
+      setDeployTarget(null)
+    },
+  })
+
   return (
     <>
       <div className="flex items-end justify-between">
@@ -103,7 +125,13 @@ export function Groups() {
         </Button>
       </div>
 
-      {groupsQuery.isError ? (
+      {liveOpenGroup ? (
+        <GroupDetail
+          group={liveOpenGroup}
+          onClose={() => setOpenGroup(null)}
+          onChanged={invalidateGroups}
+        />
+      ) : groupsQuery.isError ? (
         <ErrorBlock error={groupsQuery.error} />
       ) : groupsQuery.isLoading ? (
         <SkeletonGrid />
@@ -116,8 +144,10 @@ export function Groups() {
               key={group._id}
               group={group}
               memberCount={memberCountByGroupId.get(group._id) ?? 0}
+              onOpen={() => setOpenGroup(group)}
               onEdit={() => setEditTarget(group)}
               onDelete={() => setDeleteTarget(group)}
+              onDeploy={() => setDeployTarget(group)}
             />
           ))}
         </div>
@@ -150,6 +180,17 @@ export function Groups() {
           deleteTarget ? memberCountByGroupId.get(deleteTarget._id) ?? 0 : 0
         }
       />
+
+      <DeployGroupConfirm
+        target={deployTarget}
+        onOpenChange={(open) => !open && !deployMut.isPending && setDeployTarget(null)}
+        onConfirm={() => deployTarget && deployMut.mutate(deployTarget._id)}
+        memberCount={
+          deployTarget ? memberCountByGroupId.get(deployTarget._id) ?? 0 : 0
+        }
+        pending={deployMut.isPending}
+        error={deployMut.error}
+      />
     </>
   )
 }
@@ -157,21 +198,29 @@ export function Groups() {
 function GroupCard({
   group,
   memberCount,
+  onOpen,
   onEdit,
   onDelete,
+  onDeploy,
 }: {
   group: Group
   memberCount: number
+  onOpen: () => void
   onEdit: () => void
   onDelete: () => void
+  onDeploy: () => void
 }) {
   const deployed = (group.deployedPlaylists ?? [])
     .map(playlistRefName)
     .filter((n) => n.length > 0)
   const isDefault = group.name === 'default'
+  const canDeploy = (group.playlists?.length ?? 0) > 0
 
   return (
-    <Card className="p-5 flex flex-col gap-4 hover:border-outline-variant">
+    <Card
+      onClick={onOpen}
+      className="p-5 flex flex-col gap-4 hover:border-outline-variant cursor-pointer"
+    >
       <div className="flex justify-between items-start gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -187,6 +236,7 @@ function GroupCard({
             <button
               type="button"
               aria-label={`Actions for ${group.name}`}
+              onClick={(e) => e.stopPropagation()}
               className="text-text-muted hover:text-text-vibrant p-1 rounded-industrial hover:bg-surface-container transition-colors"
             >
               <Icon name="more_vert" />
@@ -194,6 +244,16 @@ function GroupCard({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuLabel>{group.name}</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onOpen}>
+              <Icon name="open_in_full" size={16} />
+              Open / Edit
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled={!canDeploy} onSelect={onDeploy}>
+              <Icon name="rocket_launch" size={16} />
+              {canDeploy ? 'Deploy to group' : 'Deploy (no playlists)'}
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={onEdit}>
               <Icon name="edit" size={16} />
@@ -436,6 +496,51 @@ function DeleteGroupConfirm({
           <AlertDialogAction destructive onClick={onConfirm}>
             Delete Group
           </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+}
+
+function DeployGroupConfirm({
+  target,
+  onOpenChange,
+  onConfirm,
+  memberCount,
+  pending,
+  error,
+}: {
+  target: Group | null
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => void
+  memberCount: number
+  pending: boolean
+  error: unknown
+}) {
+  const playlistCount = target?.playlists?.length ?? 0
+  return (
+    <AlertDialog open={target !== null} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Deploy &quot;{target?.name}&quot;?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {memberCount > 0
+              ? `${memberCount} player${memberCount === 1 ? '' : 's'} in this group will fetch and play its ${playlistCount} playlist${playlistCount === 1 ? '' : 's'}, replacing what they currently show.`
+              : `This group has no players assigned yet. Deploying sets its content so any player added later picks it up.`}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {error != null && (
+          <p className="text-body-sm text-status-offline" role="alert">
+            {formatError(error)}
+          </p>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
+          {/* Plain Button (not AlertDialogAction) so the dialog stays open while
+              the deploy request is in flight and can show the pending state. */}
+          <Button onClick={onConfirm} disabled={pending}>
+            {pending ? 'Deploying…' : 'Deploy'}
+          </Button>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

@@ -20,6 +20,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Icon } from '@/components/Icon'
 import { cn } from '@/lib/utils'
 import {
@@ -33,6 +40,7 @@ import {
   type Asset,
   type AssetType,
 } from '@/lib/assets'
+import { AddLinkDialog } from '@/components/AddLinkDialog'
 import { fetchLabels } from '@/lib/labels'
 
 type TypeFilter = 'all' | AssetType
@@ -47,6 +55,9 @@ const TYPE_FILTERS: { value: TypeFilter; label: string }[] = [
 
 const MAX_UPLOAD = 10 // matches multer limit in pisignage-server
 
+type ViewMode = 'list' | 'grid'
+const VIEW_KEY = 'pisignage.assetsView'
+
 export function Assets() {
   const queryClient = useQueryClient()
 
@@ -57,7 +68,18 @@ export function Assets() {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
   const [labelFilter, setLabelFilter] = useState<string | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [linkType, setLinkType] = useState<string | null>(null)
+  const [editLinkFile, setEditLinkFile] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Asset | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkConfirm, setBulkConfirm] = useState(false)
+  const [view, setViewState] = useState<ViewMode>(
+    () => (localStorage.getItem(VIEW_KEY) as ViewMode) || 'list',
+  )
+  const setView = (v: ViewMode) => {
+    setViewState(v)
+    localStorage.setItem(VIEW_KEY, v)
+  }
 
   const invalidateAssets = () => queryClient.invalidateQueries({ queryKey: ['assets'] })
 
@@ -88,6 +110,32 @@ export function Assets() {
     },
   })
 
+  const bulkDeleteMut = useMutation({
+    mutationFn: async (names: string[]) => {
+      // No bulk endpoint — delete sequentially.
+      for (const n of names) await deleteAsset(n)
+    },
+    onSuccess: () => {
+      invalidateAssets()
+      setSelected(new Set())
+      setBulkConfirm(false)
+    },
+  })
+
+  const toggleOne = (name: string) =>
+    setSelected((cur) => {
+      const next = new Set(cur)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  const toggleAll = () =>
+    setSelected((cur) => {
+      const names = filtered.map(assetName).filter(Boolean)
+      const allSel = names.length > 0 && names.every((n) => cur.has(n))
+      return allSel ? new Set() : new Set(names)
+    })
+
   return (
     <div className="flex gap-6">
       <div className="flex-1 min-w-0 flex flex-col gap-6">
@@ -100,10 +148,38 @@ export function Assets() {
                 : `${filtered.length} of ${assetsQuery.data?.length ?? 0} assets shown`}
             </p>
           </div>
-          <Button onClick={() => setUploadOpen(true)}>
-            <Icon name="cloud_upload" size={18} />
-            Upload Media
-          </Button>
+          <div className="flex">
+            <Button onClick={() => setUploadOpen(true)} className="rounded-r-none">
+              <Icon name="cloud_upload" size={18} />
+              Upload Files
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button className="rounded-l-none border-l border-on-primary/20 px-2" aria-label="More upload options">
+                  <Icon name="arrow_drop_down" size={20} />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => setUploadOpen(true)}>
+                  <Icon name="upload" size={16} />
+                  Upload local files
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => setLinkType('.tv')}>
+                  <Icon name="link" size={16} />
+                  Add a Link
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setLinkType('.txt')}>
+                  <Icon name="chat" size={16} />
+                  Add a Message
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setLinkType('.local')}>
+                  <Icon name="folder" size={16} />
+                  Add a local folder/file
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
 
         <Card className="p-3 flex flex-wrap gap-3 items-center">
@@ -137,22 +213,81 @@ export function Assets() {
             <button
               type="button"
               onClick={() => setLabelFilter(null)}
-              className="ml-auto flex items-center gap-1 text-body-sm text-text-muted hover:text-text-vibrant"
+              className="flex items-center gap-1 text-body-sm text-text-muted hover:text-text-vibrant"
             >
               <Icon name="close" size={14} />
               Clear label: <span className="text-primary">{labelFilter}</span>
             </button>
           )}
+          {/* View toggle */}
+          <div className="ml-auto flex bg-surface-container rounded p-1 border border-border-industrial">
+            <button
+              type="button"
+              onClick={() => setView('list')}
+              title="List view"
+              className={cn(
+                'p-1.5 rounded transition-colors',
+                view === 'list' ? 'bg-primary/20 text-primary' : 'text-text-muted hover:text-text-vibrant',
+              )}
+            >
+              <Icon name="view_list" size={20} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setView('grid')}
+              title="Grid view"
+              className={cn(
+                'p-1.5 rounded transition-colors',
+                view === 'grid' ? 'bg-primary/20 text-primary' : 'text-text-muted hover:text-text-vibrant',
+              )}
+            >
+              <Icon name="grid_view" size={20} />
+            </button>
+          </div>
         </Card>
+
+        {/* Bulk actions bar */}
+        {view === 'list' && selected.size > 0 && (
+          <Card className="p-3 flex items-center justify-between bg-surface-container-high">
+            <div className="flex items-center gap-4">
+              <span className="text-body-sm text-text-muted">{selected.size} selected</span>
+              <div className="h-4 w-px bg-border-industrial" />
+              <button
+                type="button"
+                onClick={() => setBulkConfirm(true)}
+                className="flex items-center gap-1 text-label-caps uppercase tracking-wider text-status-offline hover:bg-status-offline/10 px-2 py-1 rounded transition-colors"
+              >
+                <Icon name="delete" size={16} />
+                Delete selected
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              className="text-body-sm text-text-muted hover:text-text-vibrant"
+            >
+              Clear
+            </button>
+          </Card>
+        )}
 
         {assetsQuery.isError ? (
           <ErrorBlock error={assetsQuery.error} />
         ) : assetsQuery.isLoading ? (
-          <SkeletonGrid />
+          view === 'list' ? <SkeletonTable /> : <SkeletonGrid />
         ) : filtered.length === 0 ? (
           <EmptyState
             hasAny={(assetsQuery.data?.length ?? 0) > 0}
             onUpload={() => setUploadOpen(true)}
+          />
+        ) : view === 'list' ? (
+          <AssetTable
+            assets={filtered}
+            selected={selected}
+            onToggleOne={toggleOne}
+            onToggleAll={toggleAll}
+            onDelete={setDeleteTarget}
+            onEditLink={(a) => setEditLinkFile(assetName(a))}
           />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
@@ -161,6 +296,7 @@ export function Assets() {
                 key={assetName(asset) || JSON.stringify(asset).slice(0, 40)}
                 asset={asset}
                 onDelete={() => setDeleteTarget(asset)}
+                onEditLink={() => setEditLinkFile(assetName(asset))}
               />
             ))}
           </div>
@@ -174,12 +310,31 @@ export function Assets() {
         onSelect={(name) => setLabelFilter((cur) => (cur === name ? null : name))}
       />
 
+      <AddLinkDialog
+        open={linkType !== null || editLinkFile !== null}
+        initialType={linkType ?? '.tv'}
+        editFile={editLinkFile}
+        onOpenChange={(o) => {
+          if (!o) {
+            setLinkType(null)
+            setEditLinkFile(null)
+          }
+        }}
+        onSaved={() => {
+          invalidateAssets()
+          ;[1500, 4000].forEach((ms) => window.setTimeout(invalidateAssets, ms))
+        }}
+      />
+
       <UploadDialog
         open={uploadOpen}
         onOpenChange={setUploadOpen}
         onUploaded={() => {
+          // Server processing (probe/transcode/thumbnail) runs asynchronously, so
+          // re-check a few times — processed assets (especially transcoded video)
+          // appear without waiting for the 60s background poll.
           invalidateAssets()
-          setUploadOpen(false)
+          ;[1500, 4000, 8000, 15000].forEach((ms) => window.setTimeout(invalidateAssets, ms))
         }}
       />
 
@@ -209,11 +364,238 @@ export function Assets() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog open={bulkConfirm} onOpenChange={(o) => !o && !bulkDeleteMut.isPending && setBulkConfirm(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {selected.size} asset{selected.size === 1 ? '' : 's'}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The selected files are removed from disk. Playlists using them will be left with
+              missing items. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {bulkDeleteMut.error != null && (
+            <p className="text-body-sm text-status-offline" role="alert">
+              {bulkDeleteMut.error instanceof Error ? bulkDeleteMut.error.message : 'Bulk delete failed'}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={bulkDeleteMut.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              destructive
+              disabled={bulkDeleteMut.isPending}
+              onClick={(e) => {
+                e.preventDefault()
+                bulkDeleteMut.mutate(Array.from(selected))
+              }}
+            >
+              {bulkDeleteMut.isPending ? 'Deleting…' : `Delete ${selected.size}`}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
 
-function AssetCard({ asset, onDelete }: { asset: Asset; onDelete: () => void }) {
+function AssetTable({
+  assets,
+  selected,
+  onToggleOne,
+  onToggleAll,
+  onDelete,
+  onEditLink,
+}: {
+  assets: Asset[]
+  selected: Set<string>
+  onToggleOne: (name: string) => void
+  onToggleAll: () => void
+  onDelete: (asset: Asset) => void
+  onEditLink: (asset: Asset) => void
+}) {
+  const names = assets.map(assetName).filter(Boolean)
+  const allSelected = names.length > 0 && names.every((n) => selected.has(n))
+  const checkboxCls =
+    'w-4 h-4 rounded border-border-industrial bg-surface-container-low text-primary focus:ring-0 cursor-pointer'
+  const thCls = 'p-3 text-label-caps text-text-muted uppercase tracking-wider text-[11px] font-bold'
+
+  return (
+    <Card className="p-0 overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse">
+          <thead className="bg-surface-container-high border-b border-border-industrial">
+            <tr>
+              <th className="p-3 w-10">
+                <input type="checkbox" checked={allSelected} onChange={onToggleAll} className={checkboxCls} aria-label="Select all" />
+              </th>
+              <th className={thCls}>Preview</th>
+              <th className={thCls}>Filename</th>
+              <th className={thCls}>Type</th>
+              <th className={thCls}>Status</th>
+              <th className={thCls}>Size</th>
+              <th className={cn(thCls, 'text-right')}>Added</th>
+              <th className="p-3 w-20" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border-industrial">
+            {assets.map((asset) => (
+              <AssetRow
+                key={assetName(asset) || JSON.stringify(asset).slice(0, 40)}
+                asset={asset}
+                selected={selected.has(assetName(asset))}
+                onToggle={() => onToggleOne(assetName(asset))}
+                onDelete={() => onDelete(asset)}
+                onEditLink={() => onEditLink(asset)}
+                checkboxCls={checkboxCls}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
+function AssetRow({
+  asset,
+  selected,
+  onToggle,
+  onDelete,
+  onEditLink,
+  checkboxCls,
+}: {
+  asset: Asset
+  selected: boolean
+  onToggle: () => void
+  onDelete: () => void
+  onEditLink: () => void
+  checkboxCls: string
+}) {
+  const type = inferType(asset)
+  const name = assetName(asset)
+  const date = asset.ctime ?? asset.createdAt ?? asset.mtime
+  const { icon, tone } = ICON_BY_TYPE[type] ?? ICON_BY_TYPE.other
+
+  return (
+    <tr className={cn('group transition-colors', selected ? 'bg-primary/5' : 'hover:bg-surface-container')}>
+      <td className="p-3">
+        <input type="checkbox" checked={selected} onChange={onToggle} className={checkboxCls} aria-label={`Select ${name}`} />
+      </td>
+      <td className="p-3">
+        <MiniThumb asset={asset} type={type} />
+      </td>
+      <td className="p-3">
+        <div className="flex flex-col min-w-0">
+          <span className="text-body-sm font-bold text-text-vibrant truncate max-w-[280px]" title={name}>
+            {name || <span className="text-text-muted italic">(unnamed)</span>}
+          </span>
+          {asset.labels && asset.labels.length > 0 && (
+            <div className="flex gap-1 mt-1">
+              {asset.labels.slice(0, 3).map((l) => (
+                <span key={l} className="px-1.5 py-0.5 rounded-sm bg-primary/10 text-[9px] text-primary font-bold uppercase">
+                  {l}
+                </span>
+              ))}
+              {asset.labels.length > 3 && (
+                <span className="text-[9px] text-text-muted">+{asset.labels.length - 3}</span>
+              )}
+            </div>
+          )}
+        </div>
+      </td>
+      <td className="p-3">
+        <div className="flex items-center gap-2 text-text-muted">
+          <Icon name={icon} size={16} className={tone} />
+          <span className="text-body-sm font-data-mono capitalize">{type}</span>
+        </div>
+      </td>
+      <td className="p-3">
+        <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-status-online/10 text-status-online border border-status-online/20">
+          <span className="w-1.5 h-1.5 rounded-full bg-status-online" />
+          <span className="text-[10px] font-bold uppercase tracking-tighter">{type === 'link' ? 'Active' : 'Ready'}</span>
+        </div>
+      </td>
+      <td className="p-3 text-body-sm font-data-mono text-text-muted whitespace-nowrap">
+        {formatBytes(asset.size) || '—'}
+      </td>
+      <td className="p-3 text-body-sm text-text-muted text-right whitespace-nowrap">{formatDate(date)}</td>
+      <td className="p-3 text-right">
+        <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+          {type === 'link' ? (
+            <button
+              type="button"
+              onClick={onEditLink}
+              aria-label={`Edit ${name}`}
+              className="p-1.5 rounded text-text-muted hover:text-primary hover:bg-surface-container-high transition-colors"
+            >
+              <Icon name="edit" size={18} />
+            </button>
+          ) : (
+            <a
+              href={`/media/${encodeURIComponent(name)}`}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={`Open ${name}`}
+              className="p-1.5 rounded text-text-muted hover:text-primary hover:bg-surface-container-high transition-colors"
+            >
+              <Icon name="open_in_new" size={18} />
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={onDelete}
+            aria-label={`Delete ${name}`}
+            className="p-1.5 rounded text-text-muted hover:text-status-offline hover:bg-status-offline/10 transition-colors"
+          >
+            <Icon name="delete" size={18} />
+          </button>
+        </div>
+      </td>
+    </tr>
+  )
+}
+
+function MiniThumb({ asset, type }: { asset: Asset; type: AssetType }) {
+  const [errored, setErrored] = useState(false)
+  const thumb = assetThumbnailUrl(asset)
+  const name = assetName(asset)
+
+  if (thumb && !errored) {
+    return (
+      <div className="w-16 h-10 rounded overflow-hidden border border-border-industrial bg-black relative shrink-0">
+        <img
+          src={thumb}
+          alt={name}
+          loading="lazy"
+          onError={() => setErrored(true)}
+          className="w-full h-full object-cover opacity-90"
+        />
+        {type === 'video' && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Icon name="play_circle" size={18} className="text-white/80" />
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const { icon, tone } = ICON_BY_TYPE[type] ?? ICON_BY_TYPE.other
+  return (
+    <div className="w-16 h-10 rounded border border-border-industrial bg-surface-container flex items-center justify-center shrink-0">
+      <Icon name={icon} size={20} className={cn('opacity-60', tone)} />
+    </div>
+  )
+}
+
+function AssetCard({
+  asset,
+  onDelete,
+  onEditLink,
+}: {
+  asset: Asset
+  onDelete: () => void
+  onEditLink: () => void
+}) {
   const type = inferType(asset)
   const date = asset.ctime ?? asset.createdAt ?? asset.mtime
   const name = assetName(asset)
@@ -246,14 +628,24 @@ function AssetCard({ asset, onDelete }: { asset: Asset; onDelete: () => void }) 
           <span>{formatDate(date)}</span>
         </div>
         <div className="flex gap-1 -mb-1">
-          <a
-            href={`/media/${encodeURIComponent(name)}`}
-            target="_blank"
-            rel="noreferrer"
-            className="flex-1 text-center text-body-sm py-1 rounded text-text-muted hover:text-text-vibrant hover:bg-surface-container transition-colors"
-          >
-            <Icon name="open_in_new" size={14} /> Open
-          </a>
+          {type === 'link' ? (
+            <button
+              type="button"
+              onClick={onEditLink}
+              className="flex-1 text-center text-body-sm py-1 rounded text-text-muted hover:text-text-vibrant hover:bg-surface-container transition-colors"
+            >
+              <Icon name="edit" size={14} /> Edit
+            </button>
+          ) : (
+            <a
+              href={`/media/${encodeURIComponent(name)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="flex-1 text-center text-body-sm py-1 rounded text-text-muted hover:text-text-vibrant hover:bg-surface-container transition-colors"
+            >
+              <Icon name="open_in_new" size={14} /> Open
+            </a>
+          )}
           <button
             type="button"
             onClick={onDelete}
@@ -389,16 +781,21 @@ function UploadDialog({
   const [dragOver, setDragOver] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
+  const [progress, setProgress] = useState(0)
+  const [phase, setPhase] = useState<'idle' | 'uploading' | 'processing' | 'done'>('idle')
+
   const uploadMut = useMutation({
     mutationFn: ({ files, onProgress }: { files: File[]; onProgress: (n: number) => void }) =>
-      uploadAssets(files, onProgress),
+      uploadAssets(files, onProgress, setPhase),
     onSuccess: () => {
       setFiles([])
+      setPhase('done')
       onUploaded()
+      // Keep the confirmation visible briefly, then close.
+      window.setTimeout(() => onOpenChange(false), 2600)
     },
+    onError: () => setPhase('idle'),
   })
-
-  const [progress, setProgress] = useState(0)
 
   const addFiles = (incoming: File[]) => {
     const merged = [...files]
@@ -422,6 +819,7 @@ function UploadDialog({
   const submit = () => {
     if (files.length === 0) return
     setProgress(0)
+    setPhase('uploading')
     uploadMut.mutate({ files, onProgress: setProgress })
   }
 
@@ -433,6 +831,7 @@ function UploadDialog({
         if (!o) {
           setFiles([])
           setProgress(0)
+          setPhase('idle')
         }
       }}
     >
@@ -500,7 +899,7 @@ function UploadDialog({
           </ul>
         )}
 
-        {uploadMut.isPending && (
+        {(phase === 'uploading' || phase === 'processing') && (
           <div className="space-y-1">
             <div className="h-1.5 bg-surface-container rounded overflow-hidden">
               <div
@@ -509,6 +908,13 @@ function UploadDialog({
               />
             </div>
             <p className="text-body-sm text-text-muted text-right">Uploading… {progress}%</p>
+          </div>
+        )}
+
+        {phase === 'done' && (
+          <div className="flex items-center gap-2 rounded-industrial border border-primary/30 bg-primary/10 p-3">
+            <Icon name="check_circle" size={18} className="text-primary" />
+            <p className="text-body-md text-text-vibrant">Uploaded</p>
           </div>
         )}
 
@@ -586,6 +992,25 @@ function SkeletonGrid() {
         </Card>
       ))}
     </div>
+  )
+}
+
+function SkeletonTable() {
+  return (
+    <Card className="p-0 overflow-hidden animate-pulse">
+      <div className="h-11 bg-surface-container-high border-b border-border-industrial" />
+      <div className="divide-y divide-border-industrial">
+        {Array.from({ length: 10 }).map((_, i) => (
+          <div key={i} className="flex items-center gap-3 p-3">
+            <div className="w-4 h-4 rounded bg-surface-container" />
+            <div className="w-16 h-10 rounded bg-surface-container" />
+            <div className="h-3 bg-surface-container rounded flex-1 max-w-[260px]" />
+            <div className="h-3 bg-surface-container rounded w-20" />
+            <div className="h-3 bg-surface-container rounded w-16 ml-auto" />
+          </div>
+        ))}
+      </div>
+    </Card>
   )
 }
 

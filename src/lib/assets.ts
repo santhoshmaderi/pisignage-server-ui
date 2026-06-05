@@ -1,7 +1,47 @@
 import { api } from './api'
-import { unwrapArray } from './envelope'
+import { assertSuccess, unwrapArray } from './envelope'
 
 export type AssetType = 'video' | 'image' | 'html' | 'link' | 'audio' | 'folder' | 'other'
+
+/**
+ * A "link" asset — a web/stream URL, an RSS feed, a text message, or a local
+ * file/folder reference. The server (POST /api/links) writes `<name><type>` to
+ * disk as JSON and registers it as a `link` asset. `type` is the file extension
+ * that selects the behavior on the player.
+ */
+export type LinkDetails = {
+  name: string
+  /** .tv .stream .radio .link .weblink .mrss .txt .local */
+  type: string
+  link?: string
+  zoom?: number
+  duration?: number
+  /** Media RSS: which fields to show (none|title|description|onlytitle|onlydescription|onlytitledescr). */
+  hideTitle?: string
+  numberOfItems?: number
+  tcp?: boolean
+  /** Optional inline CSS (message / RSS). */
+  style?: string
+  /** Message text (.txt). */
+  message?: string
+}
+
+export async function createLink(details: LinkDetails, categories: string[] = []): Promise<void> {
+  const res = await api.post('/links', { details, categories })
+  assertSuccess(res.data, 'Failed to create link')
+}
+
+/**
+ * Load a link asset's stored details for editing. The server's getLinkFileDetails
+ * replies with { data: { data: <details>, dbdata } }, so the parsed link details
+ * live at `res.data.data.data`. `filename` is the full asset name incl. extension
+ * (e.g. "TEST-Webpage.weblink").
+ */
+export async function fetchLinkDetails(filename: string): Promise<LinkDetails> {
+  const res = await api.get(`/links/${encodeURIComponent(filename)}`)
+  const env = res.data as { data?: { data?: LinkDetails } } | undefined
+  return (env?.data?.data ?? { name: '', type: '.tv' }) as LinkDetails
+}
 
 /**
  * Asset record. Field naming varies across pisignage-server forks — some use
@@ -54,25 +94,55 @@ export function assetName(asset: Asset): string {
 export async function fetchAssets(): Promise<Asset[]> {
   const res = await api.get('/files')
   const body = res.data as
-    | { data?: { dbdata?: unknown; files?: unknown } }
+    | { data?: { dbdata?: Asset[]; files?: string[]; systemAssets?: string[] } }
     | Asset[]
     | undefined
 
+  // A fork might return a bare array of assets.
   if (Array.isArray(body)) return body
-  const dbdata = body?.data?.dbdata
-  if (Array.isArray(dbdata)) return dbdata as Asset[]
-  return unwrapArray<Asset>(body)
+
+  const data = body?.data
+  const dbdata = Array.isArray(data?.dbdata) ? data.dbdata : []
+  const files = Array.isArray(data?.files) ? data.files : []
+
+  // If the server didn't send the on-disk file list, fall back to DB records.
+  if (files.length === 0) {
+    return dbdata.length ? dbdata : unwrapArray<Asset>(body)
+  }
+
+  // Like the legacy UI (public/app/js/services/assets.js): list every file on
+  // disk and enrich it with its DB record (type/thumbnail/duration/labels) when
+  // one exists. This keeps files visible even before/without server-side
+  // processing — e.g. a freshly uploaded video whose Asset doc isn't ready yet.
+  const byName = new Map<string, Asset>()
+  for (const a of dbdata) {
+    const n = assetName(a)
+    if (n) byName.set(n, a)
+  }
+  return files.map((name) => byName.get(name) ?? { name })
 }
 
-/** Multipart upload to /api/files. Multer caps the server at 10 files/request. */
+/**
+ * Multipart upload to /api/files. Multer caps the server at 10 files/request.
+ *
+ * pisignage splits uploads into two steps: POST /files only moves the bytes to
+ * the media dir; POST /postupload then probes metadata, builds the thumbnail and
+ * creates the Asset DB record (processing runs in the background server-side).
+ * Without the second call the file sits on disk but never shows up in the asset
+ * list (which reads `dbdata`). So we always follow the upload with /postupload.
+ */
+export type UploadPhase = 'uploading' | 'processing'
+
 export async function uploadAssets(
   files: File[],
   onProgress?: (pct: number) => void,
+  onPhase?: (phase: UploadPhase) => void,
 ): Promise<void> {
   const form = new FormData()
   for (const f of files) form.append('newfiles', f, f.name)
 
-  await api.post('/files', form, {
+  onPhase?.('uploading')
+  const res = await api.post('/files', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
     onUploadProgress: (evt) => {
       if (onProgress && evt.total) {
@@ -80,6 +150,16 @@ export async function uploadAssets(
       }
     },
   })
+
+  // The upload response carries the stored files as [{ name, size, type }].
+  // Hand them to /postupload so the server creates DB records + thumbnails.
+  // Processing (transcode/probe/thumbnail) runs in the background server-side,
+  // so this returns quickly with a "queued" acknowledgement.
+  const uploaded = unwrapArray<{ name: string; size: number }>(res.data)
+  if (uploaded.length) {
+    onPhase?.('processing')
+    await api.post('/postupload', { files: uploaded, categories: [] })
+  }
 }
 
 export async function deleteAsset(name: string): Promise<void> {
@@ -111,14 +191,42 @@ export function assetThumbnailUrl(asset: Asset): string | null {
   return null
 }
 
-/** Best-effort: infer asset type from name when the server didn't send one. */
+/**
+ * Map an asset to one of the UI's display categories (the tabs: video / image /
+ * html / audio / link, plus 'other').
+ *
+ * pisignage's server taxonomy is richer than the UI's tabs AND inconsistent
+ * between code paths: getFileType() types .html as 'html', but processFile() —
+ * which writes the DB `type` the list reads — types .html as 'notice' and leaves
+ * link descriptors (.tv/.stream/.link/.weblink/.mrss) with no type at all. So we
+ * normalize both the server `type` string and the file extension here.
+ *
+ * Server types with no dedicated tab ('pdf' | 'text' | 'radio' | 'gcal' | 'zip'
+ * | 'repo' | 'local') fall through to 'other' and show only under "All Assets".
+ */
 export function inferType(asset: Asset): AssetType {
-  if (asset.type && asset.type !== 'other') return asset.type as AssetType
+  const raw = (typeof asset.type === 'string' ? asset.type : '').toLowerCase()
+  switch (raw) {
+    case 'image':
+      return 'image'
+    case 'video':
+      return 'video'
+    case 'audio':
+      return 'audio'
+    case 'notice': // pisignage's type for HTML pages / dashboards / uploaded .html
+    case 'html':
+      return 'html'
+    case 'link':
+      return 'link'
+    // pdf/text/radio/gcal/zip/repo/local/other/'' → sniff the extension below.
+  }
+  // Extension lists mirror config/env/all.js on the server.
   const ext = assetName(asset).split('.').pop()?.toLowerCase() ?? ''
-  if (['mp4', 'mov', 'webm', 'mkv', 'avi'].includes(ext)) return 'video'
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image'
-  if (['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(ext)) return 'audio'
+  if (['mp4', 'mov', 'm4v', 'avi', 'webm', 'wmv', 'flv', 'mkv', 'mpg', 'mpeg', '3gp'].includes(ext)) return 'video'
+  if (['mp3', 'm4a', 'mp4a', 'aac', 'wav', 'ogg', 'flac'].includes(ext)) return 'audio'
+  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) return 'image'
   if (['html', 'htm'].includes(ext)) return 'html'
+  if (['tv', 'stream', 'link', 'weblink', 'mrss'].includes(ext)) return 'link'
   return 'other'
 }
 
