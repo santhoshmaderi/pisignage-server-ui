@@ -24,18 +24,31 @@ export type PlaylistAsset = {
   duration?: number | string
   selected?: boolean
   fullscreen?: boolean
-  /** Zone routing for multi-zone layouts. Default 'main'. */
-  option?: { zone?: string } & Record<string, unknown>
+  /** Attached zone content shown while this main asset plays: an asset filename
+   *  or a playlist reference ("__<name>.json"). Keyed by layout zone id. */
+  side?: string | null
+  bottom?: string | null
+  top?: string | null
+  option?: {
+    /** Legacy zone routing (no longer used by the v2 editor). */
+    zone?: string
+    /** Per-type flag: mute (video) / play-in-background (audio) / presentation (pdf). */
+    main?: boolean
+    /** Text overlaid on the image/video. */
+    bannerText?: string
+    /** PDF presentation mode: seconds per slide. */
+    subduration?: number
+  } & Record<string, unknown>
 }
 
 export type TickerSettings = {
   enable?: boolean
-  behavior?: 'scroll' | 'slide' | 'fade' | string
-  /** Speed varies by fork: enum string ("slow"/"normal"/"fast") or numeric (1-5). */
-  textSpeed?: 'slow' | 'normal' | 'fast' | number | string
-  position?: 'top' | 'bottom' | string
-  color?: string
-  background?: string
+  behavior?: 'slide' | 'scroll' | 'scrollRight' | 'openvg_left' | 'openvg_right' | string
+  /** pisignage stores ticker speed numerically: 1 (slow) / 2 (normal) / 3 (fast).
+   *  Read may be a string on legacy playlists; we always write a number. */
+  textSpeed?: number | string
+  /** Free-form CSS applied to the ticker strip, e.g. "color:#eee; font-style:italic;". */
+  style?: string
   /** Server field name. */
   messages?: string
   /** Alias retained for backwards compat with older UIs. */
@@ -44,32 +57,81 @@ export type TickerSettings = {
 }
 
 export type AudioSettings = {
+  /** Play this as an independent audio playlist out the aux/3.5mm port (mp3 only). */
   enable?: boolean
   random?: boolean
   volume?: number
+  /** Also output the audio on the HDMI port. */
+  hdmi?: boolean
 }
 
 export type AdsSettings = {
-  adPlaylist?: string
+  /** Make this an advert playlist (its assets are inserted into the running playlist). */
+  adPlaylist?: boolean
+  /** Don't play the main/regular playlist while this ad playlist runs. */
+  noMainPlay?: boolean
+  /** Number of assets to insert per cycle. */
   adCount?: number
+  /** Interval between insertions (seconds). */
   adInterval?: number
+}
+
+/** "Play this playlist only once during selected duration" (a.k.a. domination). */
+export type DominationSettings = {
+  enable?: boolean
+  /** Minutes between forced plays. */
+  timeInterval?: number
+}
+
+/** Played when a SIGUSR2 event is signalled on the player. */
+export type EventSettings = {
+  enable?: boolean
+  /** Seconds to play; 0 = until the next event. */
+  duration?: number | string
+}
+
+/** Played when an assigned key is pressed on the player. */
+export type KeyPressSettings = {
+  enable?: boolean
+  /** Key code that triggers this playlist. */
+  key?: number
+  /** Play through once, then return to the regular playlist. */
+  playOnceParameter?: boolean
 }
 
 export type PlaylistSettings = {
   ticker?: TickerSettings
   audio?: AudioSettings
   ads?: AdsSettings
-  /** Asset shuffle on the player. */
-  random?: boolean
-  /** Cross-fade / cut / etc. */
-  transition?: string
+  domination?: DominationSettings
+  event?: EventSettings
+  keyPress?: KeyPressSettings
+  /** Only play this playlist while the player is online. */
+  onlineOnly?: boolean
+}
+
+/** Video-window geometry (pixels) — pisignage uses `length` for width and
+ *  `width` for height, plus x/y offsets. Used for `videoWindow` (main zone)
+ *  and each entry of `zoneVideoWindow`. */
+export type VideoWindow = {
+  length?: number | string
+  width?: number | string
+  xoffset?: number | string
+  yoffset?: number | string
+  /** Main-zone only: play video solely in the main zone. */
+  mainzoneOnly?: boolean
 }
 
 export type Playlist = {
   name: string
   /** Layout template id, see lib/layouts.ts (e.g. '1', '2a'). */
   layout?: string
+  /** Custom-layout HTML file name (used when layout starts with "custom"). */
   templateName?: string
+  /** Main-zone video window position/size. null = player default. */
+  videoWindow?: VideoWindow | null
+  /** Per-zone video windows, keyed by zone id ('side', 'bottom', …). */
+  zoneVideoWindow?: Record<string, VideoWindow>
   assets: PlaylistAsset[]
   settings?: PlaylistSettings
   /** ISO date or undefined; the server stamps these on save. */
@@ -122,21 +184,25 @@ export function withDefaults(p: Playlist): Playlist {
     layout: p.layout ?? '1',
     assets: p.assets ?? [],
     settings: {
-      random: p.settings?.random ?? false,
-      transition: p.settings?.transition ?? 'none',
+      // Preserve any settings fields we don't explicitly model so a save
+      // round-trip never drops them (e.g. ticker.style on older playlists).
+      ...p.settings,
       ticker: {
+        // Preserve fields we don't model (style, tickerHeight, openvg geometry…)
+        // so a save round-trip doesn't drop them.
+        ...p.settings?.ticker,
         enable: p.settings?.ticker?.enable ?? false,
         behavior: p.settings?.ticker?.behavior ?? 'scroll',
-        textSpeed: p.settings?.ticker?.textSpeed ?? 'normal',
-        position: p.settings?.ticker?.position ?? 'bottom',
-        color: p.settings?.ticker?.color ?? '#ffffff',
-        background: p.settings?.ticker?.background ?? '#000000',
+        // pisignage expects numeric speed (1/2/3). Coerce any legacy string
+        // (incl. a previously-corrupted "normal") to a number; default 2.
+        textSpeed: Number(p.settings?.ticker?.textSpeed ?? 2) || 2,
         // Pisignage stores the ticker text in `messages`. Older UIs / forks
         // wrote it to `text`; preserve both so a save round-trip doesn't lose
         // either.
         messages: p.settings?.ticker?.messages ?? p.settings?.ticker?.text ?? '',
         text: p.settings?.ticker?.text ?? p.settings?.ticker?.messages ?? '',
         rss: {
+          ...p.settings?.ticker?.rss,
           enable: p.settings?.ticker?.rss?.enable ?? false,
           link: p.settings?.ticker?.rss?.link ?? '',
           feedDelay: p.settings?.ticker?.rss?.feedDelay ?? 10,
@@ -146,12 +212,28 @@ export function withDefaults(p: Playlist): Playlist {
         enable: p.settings?.audio?.enable ?? false,
         random: p.settings?.audio?.random ?? false,
         volume: p.settings?.audio?.volume ?? 100,
+        hdmi: p.settings?.audio?.hdmi ?? false,
       },
       ads: {
-        adPlaylist: p.settings?.ads?.adPlaylist ?? '',
-        adCount: p.settings?.ads?.adCount ?? 0,
-        adInterval: p.settings?.ads?.adInterval ?? 0,
+        adPlaylist: p.settings?.ads?.adPlaylist ?? false,
+        noMainPlay: p.settings?.ads?.noMainPlay ?? false,
+        adCount: p.settings?.ads?.adCount ?? 1,
+        adInterval: p.settings?.ads?.adInterval ?? 60,
       },
+      domination: {
+        enable: p.settings?.domination?.enable ?? false,
+        timeInterval: p.settings?.domination?.timeInterval ?? 60,
+      },
+      event: {
+        enable: p.settings?.event?.enable ?? false,
+        duration: p.settings?.event?.duration ?? 0,
+      },
+      keyPress: {
+        enable: p.settings?.keyPress?.enable ?? false,
+        key: p.settings?.keyPress?.key ?? 0,
+        playOnceParameter: p.settings?.keyPress?.playOnceParameter ?? false,
+      },
+      onlineOnly: p.settings?.onlineOnly ?? false,
     },
   }
 }

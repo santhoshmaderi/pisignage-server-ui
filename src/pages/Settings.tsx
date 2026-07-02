@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { jsPDF } from 'jspdf'
 import { Icon } from '@/components/Icon'
 import { cn } from '@/lib/utils'
 import { saveCredentials } from '@/lib/auth'
@@ -76,17 +77,20 @@ export function Settings() {
   // License upload
   const fileRef = useRef<HTMLInputElement>(null)
   const [licenseSearch, setLicenseSearch] = useState('')
-  const [selectedLicense, setSelectedLicense] = useState('')
+  const [licenseUploaded, setLicenseUploaded] = useState(false)
 
   const uploadMut = useMutation({
     mutationFn: (files: File[]) => uploadLicenses(files),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['licenses'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['licenses'] })
+      setLicenseUploaded(true)
+      setTimeout(() => setLicenseUploaded(false), 3000)
+    },
   })
   const deleteLicenseMut = useMutation({
     mutationFn: (filename: string) => deleteLicense(filename),
     onSuccess: (remaining) => {
       queryClient.setQueryData(['licenses'], remaining)
-      setSelectedLicense('')
     },
   })
 
@@ -123,6 +127,57 @@ export function Settings() {
   const credsDirty =
     creds.user !== loaded?.authCredentials?.user ||
     creds.password !== loaded?.authCredentials?.password
+
+  // Generate a PDF report of every registered license and download it (jsPDF,
+  // rendered client-side). A PDF reads as a formal artifact and isn't trivially
+  // edited like a .txt — though note a PDF is not cryptographically tamper-proof.
+  const downloadLicenseReport = () => {
+    const now = new Date()
+    const info = serverInfoQuery.data
+    const doc = new jsPDF()
+    const left = 14
+    let y = 20
+
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(16)
+    doc.text('piSignage — License Report', left, y)
+    y += 10
+
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(10)
+    const meta = [
+      `Generated:    ${now.toLocaleString()}`,
+      `Installation: ${info?.installation ?? working.installation ?? '—'}`,
+      `Server IP:    ${info?.serverIp ?? info?.ip ?? '—'}`,
+      `Version:      ${String((info?.version as string) ?? info?.gitVersion ?? '—')}`,
+      `Total registered licenses: ${licenses.length}`,
+    ]
+    for (const line of meta) {
+      doc.text(line, left, y)
+      y += 6
+    }
+
+    y += 4
+    doc.setFont('helvetica', 'bold')
+    doc.text('Registered licenses', left, y)
+    y += 7
+    doc.setFont('courier', 'normal')
+
+    if (licenses.length === 0) {
+      doc.text('(no licenses registered)', left, y)
+    } else {
+      licenses.forEach((l, i) => {
+        if (y > 285) {
+          doc.addPage()
+          y = 20
+        }
+        doc.text(`${String(i + 1).padStart(3, ' ')}.  ${l}`, left, y)
+        y += 6
+      })
+    }
+
+    doc.save(`pisignage-license-report-${now.toISOString().slice(0, 10)}.pdf`)
+  }
 
   const setField = <K extends keyof ServerSettings>(key: K, value: ServerSettings[K]) =>
     setWorking((cur) => (cur ? { ...cur, [key]: value } : cur))
@@ -197,6 +252,13 @@ export function Settings() {
                 </p>
               )}
 
+              {licenseUploaded && (
+                <p className="flex items-center gap-2 text-body-sm text-status-online">
+                  <Icon name="check_circle" size={16} />
+                  License uploaded.
+                </p>
+              )}
+
               {licenses.length === 0 ? (
                 <div className="p-4 border border-dashed border-border-industrial rounded-lg bg-surface-container-low/50 text-body-sm text-text-muted">
                   Register the player ID at pisignage.com to generate license files, then upload
@@ -207,7 +269,7 @@ export function Settings() {
                 <>
                   <div className="relative">
                     <Icon
-                      name="filter_list"
+                      name="search"
                       className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
                       size={18}
                     />
@@ -219,54 +281,70 @@ export function Settings() {
                       className={cn(inputCls, 'pl-10 py-3 font-body-md')}
                     />
                   </div>
-                  <div className="flex flex-col sm:flex-row gap-4 items-end">
-                    <label className="flex-1 w-full">
-                      <span className="block text-label-caps text-text-muted uppercase mb-2">License Pool</span>
-                      <div className="relative">
-                        <select
-                          value={selectedLicense}
-                          onChange={(e) => setSelectedLicense(e.target.value)}
-                          className={cn(inputCls, 'py-3 font-body-md appearance-none cursor-pointer pr-10')}
-                        >
-                          <option value="">Select a license</option>
-                          {filteredLicenses.map((l) => (
-                            <option key={l} value={l}>
-                              {l}
-                            </option>
-                          ))}
-                        </select>
-                        <Icon
-                          name="expand_more"
-                          size={20}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none"
-                        />
+                  <div>
+                    <span className="flex justify-between items-baseline text-label-caps text-text-muted uppercase mb-2">
+                      <span>License Pool</span>
+                      <span className="normal-case">
+                        {filteredLicenses.length} of {licenses.length}
+                      </span>
+                    </span>
+                    {filteredLicenses.length === 0 ? (
+                      <div className="p-4 border border-dashed border-border-industrial rounded-lg bg-surface-container-low/50 text-body-sm text-text-muted">
+                        No licenses match “{licenseSearch}”.
                       </div>
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => selectedLicense && deleteLicenseMut.mutate(selectedLicense)}
-                      disabled={!selectedLicense || deleteLicenseMut.isPending}
-                      className="bg-error/10 text-error font-bold px-6 py-3 rounded-lg hover:bg-error/20 transition-all border border-error/30 uppercase text-[12px] tracking-wider disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {deleteLicenseMut.isPending ? 'Deleting…' : 'Delete License'}
-                    </button>
+                    ) : (
+                      <ul className="max-h-64 overflow-y-auto rounded-lg border border-border-industrial divide-y divide-border-industrial">
+                        {filteredLicenses.map((l) => {
+                          const deleting = deleteLicenseMut.isPending && deleteLicenseMut.variables === l
+                          return (
+                            <li
+                              key={l}
+                              className="flex items-center justify-between gap-3 px-4 py-2.5 bg-surface-container-low/50 hover:bg-surface-container-high transition-colors"
+                            >
+                              <span className="font-data-mono text-body-sm text-on-surface truncate">{l}</span>
+                              <button
+                                type="button"
+                                onClick={() => deleteLicenseMut.mutate(l)}
+                                disabled={deleteLicenseMut.isPending}
+                                className="shrink-0 flex items-center gap-1 text-error hover:bg-error/10 px-2.5 py-1 rounded border border-error/30 uppercase text-[11px] tracking-wider transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              >
+                                <Icon name="delete" size={14} />
+                                {deleting ? 'Deleting…' : 'Delete'}
+                              </button>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    )}
                   </div>
                 </>
               )}
 
               <div className="p-4 border border-border-industrial border-dashed rounded-lg bg-surface-container-low/50">
-                <div className="flex items-start gap-4">
-                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
-                    <Icon name="info" />
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-4">
+                    <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                      <Icon name="info" />
+                    </div>
+                    <div>
+                      <h4 className="text-body-md font-bold text-on-surface">License Summary</h4>
+                      <p className="text-body-sm text-text-muted mt-1">
+                        {licenses.length === 0
+                          ? 'No license files are currently registered on this server.'
+                          : `You currently have ${licenses.length} license file${licenses.length === 1 ? '' : 's'} registered on this server.`}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h4 className="text-body-md font-bold text-on-surface">License Summary</h4>
-                    <p className="text-body-sm text-text-muted mt-1">
-                      {licenses.length === 0
-                        ? 'No license files are currently registered on this server.'
-                        : `You currently have ${licenses.length} license file${licenses.length === 1 ? '' : 's'} registered on this server.`}
-                    </p>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={downloadLicenseReport}
+                    disabled={licenses.length === 0}
+                    title="Download a PDF report of all registered licenses"
+                    className="shrink-0 flex items-center gap-2 bg-primary text-on-primary font-bold px-4 py-1.5 rounded hover:brightness-110 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-label-caps uppercase"
+                  >
+                    <Icon name="download" size={16} />
+                    Download License Report
+                  </button>
                 </div>
               </div>
             </div>
@@ -381,7 +459,6 @@ export function Settings() {
                     </p>
                     <SaveButton
                       label="Save Download Access"
-                      wide
                       dirty={credsDirty}
                       saving={savingKey === 'authCredentials'}
                       saved={savedKey === 'authCredentials'}
@@ -561,28 +638,22 @@ function SaveButton({
   saving,
   saved,
   onClick,
-  wide,
 }: {
   label?: string
   dirty: boolean
   saving: boolean
   saved: boolean
   onClick: () => void
-  wide?: boolean
 }) {
+  // Matches the License "Upload" button: solid primary, icon + uppercase caps.
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={!dirty || saving}
-      className={cn(
-        'font-bold rounded-lg uppercase text-[12px] tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0 min-w-[80px]',
-        wide ? 'px-10 py-3' : 'px-6 py-2.5',
-        saved
-          ? 'bg-status-online text-on-primary'
-          : 'bg-tertiary-container text-on-tertiary-container hover:brightness-110',
-      )}
+      className="flex items-center justify-center gap-2 bg-primary text-on-primary font-bold px-4 py-1.5 rounded hover:brightness-110 transition-all disabled:opacity-50 disabled:cursor-not-allowed text-label-caps uppercase shrink-0"
     >
+      <Icon name={saved ? 'check' : 'save'} size={16} />
       {saving ? 'Saving…' : saved ? 'Saved' : label}
     </button>
   )

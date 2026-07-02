@@ -10,6 +10,8 @@ export type Player = {
   name: string
   group?: { _id?: string; name?: string } | string
   cpuSerialNumber: string
+  /** IANA timezone the player uses for schedules (sleep/reboot). Empty = server/default. */
+  TZ?: string
   myIpAddress?: string
   ip?: string
   currentPlaylist?: string

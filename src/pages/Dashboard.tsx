@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Card } from '@/components/ui/card'
 import { Icon } from '@/components/Icon'
@@ -7,6 +7,8 @@ import { cn } from '@/lib/utils'
 import { loadAuthHeader } from '@/lib/auth'
 import { usePlayerStatusSocket } from '@/lib/socket'
 import { countPlayers, fetchPlayers, type Player } from '@/lib/players'
+import { fetchGroups } from '@/lib/groups'
+import { assetName, fetchAssets } from '@/lib/assets'
 
 export function Dashboard() {
   const queryClient = useQueryClient()
@@ -116,20 +118,137 @@ export function Dashboard() {
         )}
       </Card>
 
-      <Card className="p-5">
-        <div className="flex justify-between items-center mb-4 border-b border-border-industrial pb-3">
-          <SectionHeader label="System Event Log" />
-          <span className="text-data-mono text-text-muted">
-            No event stream wired yet
-          </span>
-        </div>
-        <p className="text-body-sm text-text-muted">
-          pisignage-server does not yet expose a structured event log endpoint. When one
-          lands, this panel will tail it. For now, refer to the player cards above for
-          live status changes.
-        </p>
-      </Card>
+      <RecentActivity players={players} />
     </>
+  )
+}
+
+type Activity = {
+  id: string
+  time: number
+  icon: string
+  tone: 'online' | 'offline' | 'primary' | 'tertiary' | 'muted'
+  text: string
+}
+
+const TONE_CLASS: Record<Activity['tone'], string> = {
+  online: 'bg-status-online/10 border-status-online/20 text-status-online',
+  offline: 'bg-status-offline/10 border-status-offline/20 text-status-offline',
+  primary: 'bg-primary/10 border-primary/20 text-primary',
+  tertiary: 'bg-tertiary/10 border-tertiary/20 text-tertiary',
+  muted: 'bg-surface-container-high border-border-industrial text-text-muted',
+}
+
+/**
+ * Derived activity feed — the open-source server has no event-log endpoint, so
+ * we synthesize one from data the UI already has:
+ *   - live online/offline/now-playing transitions (diffed from the players query)
+ *   - recent deploys (group.lastDeployed), uploads (asset ctime), registrations
+ * Newest first. Live transitions are session-scoped (no server history).
+ */
+function RecentActivity({ players }: { players: Player[] }) {
+  const groupsQuery = useQuery({ queryKey: ['groups'], queryFn: fetchGroups, staleTime: 60_000 })
+  const assetsQuery = useQuery({ queryKey: ['assets'], queryFn: fetchAssets, staleTime: 60_000 })
+
+  const [tick, setTick] = useState(Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), 30_000)
+    return () => clearInterval(id)
+  }, [])
+
+  // Detect online/offline/now-playing transitions by diffing successive snapshots.
+  const prevRef = useRef<Map<string, { conn: boolean; pl?: string }> | null>(null)
+  const [transitions, setTransitions] = useState<Activity[]>([])
+  useEffect(() => {
+    const prev = prevRef.current
+    const next = new Map<string, { conn: boolean; pl?: string }>()
+    const fresh: Activity[] = []
+    const now = Date.now()
+    for (const p of players) {
+      const cur = { conn: !!p.isConnected, pl: p.currentPlaylist }
+      next.set(p._id, cur)
+      const was = prev?.get(p._id)
+      if (!was) continue // first snapshot → don't flood the feed
+      if (was.conn !== cur.conn) {
+        fresh.push({
+          id: `${p._id}-conn-${now}`,
+          time: now,
+          icon: cur.conn ? 'wifi' : 'wifi_off',
+          tone: cur.conn ? 'online' : 'offline',
+          text: `${p.name} ${cur.conn ? 'came online' : 'went offline'}`,
+        })
+      } else if (cur.conn && cur.pl && was.pl !== cur.pl) {
+        fresh.push({
+          id: `${p._id}-pl-${now}`,
+          time: now,
+          icon: 'play_circle',
+          tone: 'tertiary',
+          text: `${p.name} now playing ${cur.pl}`,
+        })
+      }
+    }
+    prevRef.current = next
+    if (fresh.length) setTransitions((t) => [...fresh, ...t].slice(0, 30))
+  }, [players])
+
+  // Timestamped events from existing records.
+  const records = useMemo<Activity[]>(() => {
+    const items: Activity[] = []
+    const toMs = (v: unknown): number => {
+      if (typeof v === 'number') return v
+      const t = v ? Date.parse(String(v)) : NaN
+      return isNaN(t) ? 0 : t
+    }
+    for (const g of groupsQuery.data ?? []) {
+      const t = toMs(g.lastDeployed)
+      if (t) items.push({ id: `dep-${g._id}`, time: t, icon: 'rocket_launch', tone: 'primary', text: `Deployed content to ${g.name}` })
+    }
+    const assets = [...(assetsQuery.data ?? [])]
+      .map((a) => ({ a, t: toMs(a.ctime ?? a.createdAt ?? a.mtime) }))
+      .filter((x) => x.t > 0)
+      .sort((x, y) => y.t - x.t)
+      .slice(0, 8)
+    for (const { a, t } of assets) items.push({ id: `up-${assetName(a)}`, time: t, icon: 'cloud_upload', tone: 'tertiary', text: `Added asset ${assetName(a)}` })
+    const newPlayers = [...players]
+      .map((p) => ({ p, t: toMs(p.createdAt) }))
+      .filter((x) => x.t > 0)
+      .sort((x, y) => y.t - x.t)
+      .slice(0, 5)
+    for (const { p, t } of newPlayers) items.push({ id: `reg-${p._id}`, time: t, icon: 'add_circle', tone: 'muted', text: `Player ${p.name} registered` })
+    return items
+  }, [groupsQuery.data, assetsQuery.data, players])
+
+  const feed = useMemo(
+    () => [...transitions, ...records].sort((a, b) => b.time - a.time).slice(0, 12),
+    [transitions, records],
+  )
+
+  return (
+    <Card className="p-5">
+      <div className="flex justify-between items-center mb-4 border-b border-border-industrial pb-3">
+        <SectionHeader label="Recent Activity" />
+        <span className="text-data-mono text-text-muted">{feed.length ? `${feed.length} events` : 'live'}</span>
+      </div>
+      {feed.length === 0 ? (
+        <p className="text-body-sm text-text-muted">
+          No recent activity. Player status changes, deploys and uploads will appear here.
+        </p>
+      ) : (
+        <ul className="space-y-1">
+          {feed.map((e) => (
+            <li key={e.id} className="flex items-start gap-3 p-2 rounded hover:bg-surface-container transition-colors">
+              <div className={cn('w-8 h-8 rounded flex items-center justify-center shrink-0 border', TONE_CLASS[e.tone])}>
+                <Icon name={e.icon} size={16} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-body-md text-text-vibrant truncate">{e.text}</p>
+                <p className="font-mono text-[11px] text-text-muted mt-0.5">{formatRelative(e.time, tick)}</p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   )
 }
 

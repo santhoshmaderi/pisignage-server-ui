@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -36,6 +36,7 @@ import { cn } from '@/lib/utils'
 import { loadAuthHeader } from '@/lib/auth'
 import { usePlayerStatusSocket } from '@/lib/socket'
 import { fetchGroups } from '@/lib/groups'
+import { TIME_ZONES } from '@/lib/timezones'
 import {
   deletePlayer,
   fetchPlayers,
@@ -65,6 +66,11 @@ export function Players() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [groupFilter, setGroupFilter] = useState<string>('all')
+  const [registerOpen, setRegisterOpen] = useState(false)
+  // The v2 UI is served by the same server players connect to, so its own
+  // origin IS the address to enter on the player (host + port + scheme, and
+  // whatever a reverse proxy presents) — never hardcode it.
+  const serverOrigin = window.location.origin
 
   const groupNameById = useMemo(() => {
     const m = new Map<string, string>()
@@ -97,10 +103,14 @@ export function Players() {
               : `${filtered.length} of ${playersQuery.data?.length ?? 0} terminals shown`}
           </p>
         </div>
-        <Button variant="outline">
-          <Icon name="add" size={18} />
-          Register Player
-        </Button>
+        <button
+          type="button"
+          onClick={() => setRegisterOpen(true)}
+          className="group inline-flex items-center gap-2.5 rounded-full border border-white/15 bg-surface-container/70 px-5 py-2.5 text-body-md font-medium text-text-vibrant shadow-[0_0_22px_-4px_rgba(255,255,255,0.25)] transition-all hover:border-white/35 hover:shadow-[0_0_30px_-2px_rgba(255,255,255,0.4)] active:scale-[0.98]"
+        >
+          <Icon name="info" size={20} />
+          How to Register a Player
+        </button>
       </div>
 
       <Toolbar
@@ -131,7 +141,110 @@ export function Players() {
           ))}
         </div>
       )}
+
+      <Dialog open={registerOpen} onOpenChange={setRegisterOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-3">
+              <Icon name="help" className="text-primary" size={26} />
+              Register Player
+            </DialogTitle>
+          </DialogHeader>
+
+          <ol className="flex flex-col gap-5 mt-1">
+            <RegisterStep n={1}>
+              <p className="text-body-md text-text-vibrant">
+                <span className="font-semibold text-primary">Set server address</span> — on the
+                player, enter:
+              </p>
+              <CopyField value={serverOrigin} />
+              <p className="text-body-sm text-text-muted italic">
+                (include the port). Ensure no firewall blocks it.
+              </p>
+            </RegisterStep>
+
+            <RegisterStep n={2}>
+              <p className="text-body-md text-text-vibrant">
+                <span className="font-semibold text-primary">
+                  Register at{' '}
+                  <a
+                    href="https://pisignage.com"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline hover:no-underline"
+                  >
+                    pisignage.com
+                  </a>
+                </span>{' '}
+                — use the Player ID shown on the TV, choose{' '}
+                <span className="bg-surface-container-high border border-border-industrial rounded px-1.5 py-0.5 text-text-vibrant font-medium whitespace-nowrap">
+                  “Player License Only”
+                </span>
+                , and download the license file.
+              </p>
+            </RegisterStep>
+
+            <RegisterStep n={3}>
+              <p className="text-body-md text-text-vibrant">
+                <span className="font-semibold text-primary">Upload the license</span> — in
+                Settings, upload the file. Keep the installation name identical to your
+                pisignage.com username (case-sensitive, not email).
+              </p>
+            </RegisterStep>
+
+            <RegisterStep n={4}>
+              <p className="text-body-md text-text-vibrant">
+                <span className="font-semibold text-primary">Confirm online</span> — once
+                connected, the license activates and the player appears here instantly.
+              </p>
+            </RegisterStep>
+          </ol>
+
+          <div className="mt-6 flex justify-end">
+            <Button onClick={() => setRegisterOpen(false)}>Got it</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
+  )
+}
+
+function RegisterStep({ n, children }: { n: number; children: ReactNode }) {
+  return (
+    <li className="flex gap-4">
+      <span className="shrink-0 w-7 h-7 rounded-full bg-primary text-on-primary flex items-center justify-center font-bold text-body-sm mt-0.5">
+        {n}
+      </span>
+      <div className="flex flex-col gap-2 min-w-0">{children}</div>
+    </li>
+  )
+}
+
+/** The "technical block" — a mono address with a copy-to-clipboard button. */
+function CopyField({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2000)
+    } catch {
+      /* clipboard unavailable (e.g. non-secure context) — ignore */
+    }
+  }
+  return (
+    <div className="flex items-center justify-between gap-3 max-w-md rounded-lg border border-border-industrial border-l-2 border-l-primary bg-canvas-depth-1 p-3">
+      <code className="font-mono text-body-sm text-primary truncate">{value}</code>
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={copied ? 'Copied' : 'Copy address'}
+        title="Copy"
+        className="shrink-0 p-1 text-text-muted hover:text-primary transition-colors"
+      >
+        <Icon name={copied ? 'check' : 'content_copy'} size={18} className={copied ? 'text-primary' : ''} />
+      </button>
+    </div>
   )
 }
 
@@ -382,9 +495,11 @@ function PlayerActions({
   const [pendingConfirm, setPendingConfirm] = useState<
     null | { kind: 'restart' | 'delete' | 'update'; label: string }
   >(null)
-  // null = closed. Rename holds the editable name; group holds the selected id.
+  // null = closed. Rename holds the editable name; group holds the selected id;
+  // tz holds the selected timezone ('' = No TZ).
   const [renameValue, setRenameValue] = useState<string | null>(null)
   const [groupValue, setGroupValue] = useState<string | null>(null)
+  const [tzValue, setTzValue] = useState<string | null>(null)
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['players'] })
 
@@ -400,6 +515,13 @@ function PlayerActions({
     onSuccess: () => {
       invalidate()
       setGroupValue(null)
+    },
+  })
+  const tzMut = useMutation({
+    mutationFn: (tz: string) => updatePlayer(player._id, { TZ: tz }),
+    onSuccess: () => {
+      invalidate()
+      setTzValue(null)
     },
   })
 
@@ -459,6 +581,10 @@ function PlayerActions({
           <DropdownMenuItem onSelect={() => setGroupValue(playerGroupId(player) ?? '')}>
             <Icon name="move_group" size={16} />
             Change Group
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setTzValue(player.TZ ?? '')}>
+            <Icon name="schedule" size={16} />
+            Set Timezone
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
@@ -616,6 +742,67 @@ function PlayerActions({
                 }}
               >
                 {changeGroupMut.isPending ? 'Moving…' : 'Move'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set timezone */}
+      <Dialog
+        open={tzValue !== null}
+        onOpenChange={(o) => {
+          if (!o) {
+            setTzValue(null)
+            tzMut.reset()
+          }
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Set Timezone</DialogTitle>
+            <DialogDescription>
+              Timezone for “{player.name}”. Schedules (display off, reboot) use this zone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <div className="relative">
+              <select
+                value={tzValue ?? ''}
+                onChange={(e) => setTzValue(e.target.value)}
+                className="appearance-none w-full h-10 bg-canvas-depth-1 border border-border-industrial rounded-industrial pl-3 pr-9 text-body-md text-text-vibrant focus:outline-none focus:border-primary"
+              >
+                <option value="">— No TZ (server default) —</option>
+                {tzValue && !TIME_ZONES.includes(tzValue) && (
+                  <option value={tzValue}>{tzValue}</option>
+                )}
+                {TIME_ZONES.map((tz) => (
+                  <option key={tz} value={tz}>
+                    {tz}
+                  </option>
+                ))}
+              </select>
+              <Icon
+                name="arrow_drop_down"
+                size={20}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none"
+              />
+            </div>
+            {tzMut.error != null && (
+              <p className="text-body-sm text-status-offline" role="alert">
+                {tzMut.error instanceof Error ? tzMut.error.message : 'Failed to set timezone'}
+              </p>
+            )}
+            <div className="flex justify-end gap-2 mt-1">
+              <Button type="button" variant="outline" onClick={() => setTzValue(null)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                disabled={tzValue === (player.TZ ?? '') || tzMut.isPending}
+                onClick={() => tzValue !== null && tzMut.mutate(tzValue)}
+              >
+                {tzMut.isPending ? 'Saving…' : 'Save'}
               </Button>
             </div>
           </div>

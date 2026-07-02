@@ -20,11 +20,33 @@ import { CSS } from '@dnd-kit/utilities'
 import { useQuery } from '@tanstack/react-query'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Icon } from '@/components/Icon'
 import { cn } from '@/lib/utils'
-import { assetName, assetThumbnailUrl, fetchAssets, formatBytes, inferType, type Asset, type AssetType } from '@/lib/assets'
-import { findLayout, type LayoutZone } from '@/lib/layouts'
 import {
+  assetName,
+  assetThumbnailUrl,
+  fetchAssets,
+  formatBytes,
+  inferType,
+  type Asset,
+  type AssetType,
+} from '@/lib/assets'
+import {
+  findLayout,
+  attachableZones,
+  zoneDisplayLabel,
+  type LayoutZone,
+  type LayoutZoneId,
+} from '@/lib/layouts'
+import {
+  fetchPlaylists,
   formatDuration,
   totalDuration,
   type Playlist,
@@ -36,6 +58,9 @@ export type SequenceSectionProps = {
   onChange: (next: Playlist) => void
 }
 
+/** Zones an asset can carry attachments for (everything except 'main'). */
+type AttachZone = Exclude<LayoutZoneId, 'main'>
+
 const LIBRARY_TYPES: { value: AssetType | 'all'; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'video', label: 'Video' },
@@ -44,7 +69,7 @@ const LIBRARY_TYPES: { value: AssetType | 'all'; label: string }[] = [
 ]
 
 const DEFAULT_DURATION: Record<AssetType, number> = {
-  video: 0, // honored by player
+  video: 0,
   image: 10,
   html: 30,
   link: 30,
@@ -53,14 +78,6 @@ const DEFAULT_DURATION: Record<AssetType, number> = {
   other: 10,
 }
 
-/**
- * Duration to give an asset when it's dropped onto the timeline.
- *
- * Video/audio: use the asset's known length (rounded) so the timeline reflects
- * the real clip; fall back to 0 = "play the full clip" (resolved by the player)
- * when no duration metadata is available — never a fixed 10s. Image/HTML/link
- * keep their fixed defaults.
- */
 function defaultDurationFor(asset: Asset): number {
   const type = inferType(asset)
   if (type === 'video' || type === 'audio') {
@@ -70,14 +87,24 @@ function defaultDurationFor(asset: Asset): number {
   return DEFAULT_DURATION[type] ?? 10
 }
 
+/** Infer an asset type from a bare filename (timeline rows only store the name). */
+function typeFromName(name: string): AssetType {
+  return inferType({ name } as Asset)
+}
+
 export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
   const layout = findLayout(playlist.layout)
   const zones = layout.zones
-  const [activeZone, setActiveZone] = useState<string>(zones[0]?.id ?? 'main')
+  const otherZones = attachableZones(layout) // non-main zone objects; empty for single-zone
 
   const assetsQuery = useQuery({ queryKey: ['assets'], queryFn: fetchAssets, staleTime: 60_000 })
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState<AssetType | 'all'>('all')
+
+  // Which (assetIndex, zone) the zone-attach picker is open for.
+  const [attachTarget, setAttachTarget] = useState<{ index: number; zone: AttachZone } | null>(
+    null,
+  )
 
   const libraryAssets = useMemo(() => {
     const term = search.trim().toLowerCase()
@@ -86,17 +113,13 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
       if (term && !assetName(a).toLowerCase().includes(term)) return false
       return true
     })
-    // Last added first (newest at the top). Stable for items without a timestamp.
     return [...list].sort((a, b) => assetTime(b) - assetTime(a))
   }, [assetsQuery.data, search, typeFilter])
 
-  const zoneAssets = useMemo(
-    () => playlist.assets.filter((a) => (a.option?.zone ?? 'main') === activeZone),
-    [playlist.assets, activeZone],
-  )
-
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }))
   const [activeDragLabel, setActiveDragLabel] = useState<string | null>(null)
+
+  const assets = playlist.assets
 
   const handleDragStart = (e: DragStartEvent) => {
     setActiveDragLabel(String(e.active.data.current?.label ?? e.active.id))
@@ -107,72 +130,50 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
     const { active, over } = event
     if (!over) return
 
-    const fromLibrary = active.data.current?.source === 'library'
-    const fromTimeline = active.data.current?.source === 'timeline'
-
-    // Drop from library → into the active zone's timeline.
-    if (fromLibrary) {
+    if (active.data.current?.source === 'library') {
       const file = active.data.current?.asset as Asset | undefined
-      if (!file) return
-      const fname = assetName(file)
+      const fname = file ? assetName(file) : ''
       if (!fname) return
       const newAsset: PlaylistAsset = {
         filename: fname,
-        duration: defaultDurationFor(file),
+        duration: defaultDurationFor(file!),
         selected: true,
-        fullscreen: false,
-        option: { zone: activeZone },
+        // Single-zone layouts always play fullscreen (matches the server's saveData).
+        fullscreen: otherZones.length === 0,
+        option: {},
       }
-      const nextAssets = insertAfter(playlist.assets, newAsset, String(over.id), activeZone)
-      onChange({ ...playlist, assets: nextAssets })
+      onChange({ ...playlist, assets: insertAfter(assets, newAsset, String(over.id)) })
       return
     }
 
-    // Reorder within the timeline.
-    if (fromTimeline && active.id !== over.id) {
-      const ids = zoneAssets.map((_, i) => timelineId(activeZone, i))
+    if (active.data.current?.source === 'timeline' && active.id !== over.id) {
+      const ids = assets.map((_, i) => timelineId(i))
       const oldIndex = ids.indexOf(String(active.id))
       const newIndex = ids.indexOf(String(over.id))
       if (oldIndex < 0 || newIndex < 0) return
-      const reordered = arrayMove(zoneAssets, oldIndex, newIndex)
-      // Rebuild playlist.assets with reordered chunk in place.
-      const next: PlaylistAsset[] = []
-      let r = 0
-      for (const a of playlist.assets) {
-        if ((a.option?.zone ?? 'main') === activeZone) {
-          next.push(reordered[r++])
-        } else {
-          next.push(a)
-        }
-      }
-      onChange({ ...playlist, assets: next })
+      onChange({ ...playlist, assets: arrayMove(assets, oldIndex, newIndex) })
     }
-  }
-
-  const removeFromTimeline = (idx: number) => {
-    const next = [...playlist.assets]
-    let nth = -1
-    for (let i = 0; i < next.length; i++) {
-      if ((next[i].option?.zone ?? 'main') === activeZone) nth++
-      if (nth === idx) {
-        next.splice(i, 1)
-        break
-      }
-    }
-    onChange({ ...playlist, assets: next })
   }
 
   const updateAsset = (idx: number, patch: Partial<PlaylistAsset>) => {
-    const next = [...playlist.assets]
-    let nth = -1
-    for (let i = 0; i < next.length; i++) {
-      if ((next[i].option?.zone ?? 'main') === activeZone) nth++
-      if (nth === idx) {
-        next[i] = { ...next[i], ...patch }
-        break
-      }
-    }
+    const next = assets.map((a, i) => (i === idx ? { ...a, ...patch } : a))
     onChange({ ...playlist, assets: next })
+  }
+
+  const removeAsset = (idx: number) => {
+    onChange({ ...playlist, assets: assets.filter((_, i) => i !== idx) })
+  }
+
+  const duplicateAsset = (idx: number) => {
+    const next = [...assets]
+    next.splice(idx + 1, 0, { ...assets[idx] })
+    onChange({ ...playlist, assets: next })
+  }
+
+  const saveAttach = (value: string) => {
+    if (!attachTarget) return
+    updateAsset(attachTarget.index, { [attachTarget.zone]: value } as Partial<PlaylistAsset>)
+    setAttachTarget(null)
   }
 
   return (
@@ -212,13 +213,9 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
           </div>
           <div className="overflow-y-auto -mx-1 px-1 space-y-1 min-h-0">
             {assetsQuery.isLoading ? (
-              <p className="text-body-sm text-text-muted text-center py-6">
-                Loading assets…
-              </p>
+              <p className="text-body-sm text-text-muted text-center py-6">Loading assets…</p>
             ) : libraryAssets.length === 0 ? (
-              <p className="text-body-sm text-text-muted text-center py-6">
-                No assets match.
-              </p>
+              <p className="text-body-sm text-text-muted text-center py-6">No assets match.</p>
             ) : (
               libraryAssets.map((asset, i) => (
                 <LibraryItem key={assetName(asset) || `idx-${i}`} asset={asset} />
@@ -229,39 +226,24 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
 
         {/* Timeline */}
         <div className="col-span-12 lg:col-span-6 flex flex-col gap-3">
-          {zones.length > 1 && (
-            <div className="flex gap-1 bg-canvas-depth-1 p-1 rounded-industrial border border-border-industrial self-start">
-              {zones.map((z) => (
-                <button
-                  key={z.id}
-                  type="button"
-                  onClick={() => setActiveZone(z.id)}
-                  className={cn(
-                    'px-3 py-1 rounded text-body-sm transition-colors',
-                    activeZone === z.id
-                      ? 'bg-surface-variant text-text-vibrant'
-                      : 'text-text-muted hover:text-text-vibrant',
-                  )}
-                >
-                  {zoneLabel(z)}
-                </button>
-              ))}
-            </div>
-          )}
-
           <Timeline
-            zone={activeZone}
-            assets={zoneAssets}
-            totalSec={totalDuration(playlist, activeZone)}
-            onRemove={removeFromTimeline}
+            assets={assets}
+            otherZones={otherZones}
+            totalSec={totalDuration(playlist)}
+            onRemove={removeAsset}
             onUpdate={updateAsset}
+            onDuplicate={duplicateAsset}
+            onAttach={(index, zone) => setAttachTarget({ index, zone })}
+            onDetach={(index, zone) =>
+              updateAsset(index, { [zone]: null } as Partial<PlaylistAsset>)
+            }
           />
         </div>
 
         {/* Layout preview */}
         <Card className="col-span-12 lg:col-span-3 p-4 self-start">
           <h3 className="text-headline-sm text-text-vibrant mb-3">Layout</h3>
-          <LayoutPreview zones={zones} activeZone={activeZone} onZoneClick={setActiveZone} />
+          <LayoutPreview zones={zones} />
           <dl className="mt-4 space-y-1 font-mono text-[11px] text-text-muted">
             <div className="flex justify-between">
               <dt>Layout</dt>
@@ -276,6 +258,13 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
               <dd className="text-text-vibrant">{formatDuration(totalDuration(playlist))}</dd>
             </div>
           </dl>
+          {otherZones.length > 0 && (
+            <p className="text-body-sm text-text-muted mt-3">
+              This layout has extra zones — use <strong className="text-text-vibrant">Add zone
+              content</strong> on each item to fill the{' '}
+              {otherZones.map(zoneDisplayLabel).join(' / ')} zone(s).
+            </p>
+          )}
         </Card>
       </div>
 
@@ -286,6 +275,15 @@ export function SequenceSection({ playlist, onChange }: SequenceSectionProps) {
           </div>
         ) : null}
       </DragOverlay>
+
+      <ZoneAttachDialog
+        target={attachTarget}
+        current={
+          attachTarget ? (assets[attachTarget.index]?.[attachTarget.zone] ?? null) : null
+        }
+        onSelect={saveAttach}
+        onClose={() => setAttachTarget(null)}
+      />
     </DndContext>
   )
 }
@@ -335,7 +333,6 @@ function LibraryItem({ asset }: { asset: Asset }) {
   )
 }
 
-/** Compact metadata line: duration (a/v) or resolution (image), then size. */
 function assetMeta(asset: Asset, type: AssetType): string {
   const parts: string[] = []
   const dur = Number(asset.duration)
@@ -348,7 +345,6 @@ function assetMeta(asset: Asset, type: AssetType): string {
   return parts.join(' • ')
 }
 
-/** Timestamp for "newest first" sorting; 0 when no usable date is present. */
 function assetTime(a: Asset): number {
   const v = a.ctime ?? a.createdAt ?? a.mtime
   const t = v ? new Date(v).getTime() : NaN
@@ -373,28 +369,34 @@ function iconFor(type: AssetType): string {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Timeline + sortable items
+// Timeline + sortable rows
 // ────────────────────────────────────────────────────────────────────────────
 
-function timelineId(zone: string, index: number): string {
-  return `tl:${zone}:${index}`
+function timelineId(index: number): string {
+  return `tl:${index}`
 }
 
 function Timeline({
-  zone,
   assets,
+  otherZones,
   totalSec,
   onRemove,
   onUpdate,
+  onDuplicate,
+  onAttach,
+  onDetach,
 }: {
-  zone: string
   assets: PlaylistAsset[]
+  otherZones: LayoutZone[]
   totalSec: number
   onRemove: (idx: number) => void
   onUpdate: (idx: number, patch: Partial<PlaylistAsset>) => void
+  onDuplicate: (idx: number) => void
+  onAttach: (idx: number, zone: AttachZone) => void
+  onDetach: (idx: number, zone: AttachZone) => void
 }) {
-  const ids = assets.map((_, i) => timelineId(zone, i))
-  const { setNodeRef, isOver } = useDroppable({ id: `drop:${zone}` })
+  const ids = assets.map((_, i) => timelineId(i))
+  const { setNodeRef, isOver } = useDroppable({ id: 'drop:timeline' })
 
   return (
     <Card className={cn('p-4 flex flex-col min-h-[420px]', isOver && 'border-primary/60')}>
@@ -422,11 +424,15 @@ function Timeline({
           ) : (
             assets.map((asset, idx) => (
               <SortableTimelineItem
-                key={timelineId(zone, idx)}
-                id={timelineId(zone, idx)}
+                key={timelineId(idx)}
+                id={timelineId(idx)}
                 asset={asset}
+                otherZones={otherZones}
                 onRemove={() => onRemove(idx)}
                 onUpdate={(patch) => onUpdate(idx, patch)}
+                onDuplicate={() => onDuplicate(idx)}
+                onAttach={(zone) => onAttach(idx, zone)}
+                onDetach={(zone) => onDetach(idx, zone)}
               />
             ))
           )}
@@ -439,13 +445,21 @@ function Timeline({
 function SortableTimelineItem({
   id,
   asset,
+  otherZones,
   onRemove,
   onUpdate,
+  onDuplicate,
+  onAttach,
+  onDetach,
 }: {
   id: string
   asset: PlaylistAsset
+  otherZones: LayoutZone[]
   onRemove: () => void
   onUpdate: (patch: Partial<PlaylistAsset>) => void
+  onDuplicate: () => void
+  onAttach: (zone: AttachZone) => void
+  onDetach: (zone: AttachZone) => void
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id,
@@ -456,74 +470,281 @@ function SortableTimelineItem({
     transition,
     opacity: isDragging ? 0.4 : 1,
   }
+  const type = typeFromName(asset.filename)
+  const setOption = (patch: Partial<NonNullable<PlaylistAsset['option']>>) =>
+    onUpdate({ option: { ...(asset.option ?? {}), ...patch } })
+
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className="flex items-center gap-3 p-2 rounded-industrial bg-surface-container border border-border-industrial"
+      className="flex flex-col gap-2 p-2 rounded-industrial bg-surface-container border border-border-industrial"
     >
-      <button
-        type="button"
-        aria-label="Drag to reorder"
-        className="cursor-grab text-text-muted hover:text-text-vibrant"
-        {...listeners}
-        {...attributes}
-      >
-        <Icon name="drag_indicator" />
-      </button>
-      <div className="flex-1 min-w-0">
-        <p className="text-body-md text-text-vibrant truncate">{asset.filename}</p>
-        {asset.option?.zone && (
-          <p className="text-body-sm text-text-muted font-mono">zone: {asset.option.zone}</p>
+      {/* Row 1 — drag, name, duration, duplicate, remove */}
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          aria-label="Drag to reorder"
+          className="cursor-grab text-text-muted hover:text-text-vibrant"
+          {...listeners}
+          {...attributes}
+        >
+          <Icon name="drag_indicator" />
+        </button>
+        <div className="flex-1 min-w-0">
+          <p className="text-body-md text-text-vibrant truncate">{asset.filename}</p>
+          <p className="font-mono text-[10px] text-text-muted uppercase">{type}</p>
+        </div>
+        <label className="flex items-center gap-1 text-body-sm text-text-muted">
+          <input
+            type="number"
+            min={1}
+            value={asset.duration ?? 10}
+            onChange={(e) => onUpdate({ duration: Number(e.target.value) })}
+            className="w-14 h-7 bg-canvas-depth-1 border border-border-industrial rounded px-2 text-body-sm text-text-vibrant text-right font-mono focus:outline-none focus:border-primary"
+          />
+          s
+        </label>
+        <button
+          type="button"
+          aria-label="Duplicate"
+          title="Duplicate this asset"
+          onClick={onDuplicate}
+          className="text-text-muted hover:text-primary p-1"
+        >
+          <Icon name="content_copy" size={16} />
+        </button>
+        <button
+          type="button"
+          aria-label={`Remove ${asset.filename}`}
+          onClick={onRemove}
+          className="text-text-muted hover:text-status-offline p-1"
+        >
+          <Icon name="close" size={16} />
+        </button>
+      </div>
+
+      {/* Row 2 — options + zone attachments */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pl-8">
+        <label className="flex items-center gap-1.5 text-body-sm text-text-muted cursor-pointer">
+          <Switch
+            checked={!!asset.fullscreen}
+            onCheckedChange={(v) => onUpdate({ fullscreen: v })}
+          />
+          show fullscreen
+        </label>
+
+        {type === 'video' && (
+          <label className="flex items-center gap-1.5 text-body-sm text-text-muted cursor-pointer">
+            <Switch checked={!!asset.option?.main} onCheckedChange={(v) => setOption({ main: v })} />
+            mute audio
+          </label>
+        )}
+
+        {(type === 'image' || type === 'video') && (
+          <input
+            type="text"
+            value={asset.option?.bannerText ?? ''}
+            onChange={(e) => setOption({ bannerText: e.target.value })}
+            placeholder="text message over the image/video"
+            className="flex-1 min-w-[180px] h-7 bg-canvas-depth-1 border border-border-industrial rounded px-2 text-body-sm text-text-vibrant focus:outline-none focus:border-primary"
+          />
+        )}
+
+        {otherZones.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-label-caps text-text-muted uppercase">Add zone content:</span>
+            {otherZones.map((zone) => {
+              const id = zone.id as AttachZone
+              const label = zoneDisplayLabel(zone)
+              const val = asset[id]
+              return (
+                <span key={id} className="inline-flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => onAttach(id)}
+                    className={cn(
+                      'inline-flex items-center gap-1 px-2 h-6 rounded-l text-[11px] border transition-colors',
+                      val
+                        ? 'border-primary bg-primary/10 text-primary rounded-r-none'
+                        : 'border-border-industrial text-text-muted hover:border-outline-variant rounded',
+                    )}
+                    title={val ? String(val) : `Attach a file/playlist to the ${label} zone`}
+                  >
+                    <Icon name="attach_file" size={13} />
+                    {label}{val ? `: ${zoneValueLabel(String(val))}` : ''}
+                  </button>
+                  {val && (
+                    <button
+                      type="button"
+                      onClick={() => onDetach(id)}
+                      aria-label={`Clear ${label} zone`}
+                      className="inline-flex items-center justify-center w-6 h-6 rounded-r border border-l-0 border-primary bg-primary/10 text-primary hover:bg-status-offline/20 hover:text-status-offline"
+                    >
+                      <Icon name="close" size={13} />
+                    </button>
+                  )}
+                </span>
+              )
+            })}
+          </div>
         )}
       </div>
-      <label className="flex items-center gap-1 text-body-sm text-text-muted">
-        <input
-          type="number"
-          min={0}
-          value={asset.duration ?? 10}
-          onChange={(e) => onUpdate({ duration: Number(e.target.value) })}
-          className="w-14 h-7 bg-canvas-depth-1 border border-border-industrial rounded px-2 text-body-sm text-text-vibrant text-right font-mono focus:outline-none focus:border-primary"
-        />
-        s
-      </label>
-      <button
-        type="button"
-        aria-label={`Remove ${asset.filename}`}
-        onClick={onRemove}
-        className="text-text-muted hover:text-status-offline p-1"
-      >
-        <Icon name="close" size={16} />
-      </button>
     </div>
   )
 }
 
+/** Friendly label for a zone attachment value (file name or "__playlist.json"). */
+function zoneValueLabel(value: string): string {
+  if (value.startsWith('__') && value.endsWith('.json')) return value.slice(2, -5)
+  return value
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-// Layout preview
+// Zone attach dialog (file OR playlist, matching the legacy linkfile popup)
 // ────────────────────────────────────────────────────────────────────────────
 
-function LayoutPreview({
-  zones,
-  activeZone,
-  onZoneClick,
+function ZoneAttachDialog({
+  target,
+  current,
+  onSelect,
+  onClose,
 }: {
-  zones: LayoutZone[]
-  activeZone: string
-  onZoneClick: (id: string) => void
+  target: { index: number; zone: AttachZone } | null
+  current: string | null
+  onSelect: (value: string) => void
+  onClose: () => void
 }) {
+  const open = target !== null
+  const [tab, setTab] = useState<'files' | 'playlists'>('files')
+  const [search, setSearch] = useState('')
+
+  const assetsQuery = useQuery({ queryKey: ['assets'], queryFn: fetchAssets, staleTime: 60_000, enabled: open })
+  const playlistsQuery = useQuery({ queryKey: ['playlists'], queryFn: fetchPlaylists, staleTime: 60_000, enabled: open })
+
+  // Legacy excludes audio / live-stream / CORS links from zone files.
+  const files = (assetsQuery.data ?? [])
+    .filter((a) => {
+      const t = inferType(a)
+      return t !== 'audio'
+    })
+    .map(assetName)
+    .filter((n) => n && n.toLowerCase().includes(search.toLowerCase()))
+
+  const playlists = (playlistsQuery.data ?? [])
+    .map((p) => p.name)
+    .filter((n) => n.toLowerCase().includes(search.toLowerCase()))
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            File to play in the <span className="text-primary capitalize">{target?.zone}</span> zone
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="flex gap-1 border-b border-border-industrial">
+          {(['files', 'playlists'] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTab(t)}
+              className={cn(
+                'px-3 py-1.5 text-body-sm capitalize border-b-2 -mb-px transition-colors',
+                tab === t
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-text-muted hover:text-text-vibrant',
+              )}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+
+        <Input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filter by name…"
+          className="h-8"
+        />
+
+        <div className="max-h-72 overflow-y-auto -mx-1 px-1 flex flex-col gap-1">
+          {tab === 'files'
+            ? files.map((name) => (
+                <ZoneOption
+                  key={name}
+                  label={name}
+                  active={current === name}
+                  onClick={() => onSelect(name)}
+                />
+              ))
+            : playlists.map((name) => {
+                const value = `__${name}.json`
+                return (
+                  <ZoneOption
+                    key={name}
+                    label={name}
+                    icon="queue_music"
+                    active={current === value}
+                    onClick={() => onSelect(value)}
+                  />
+                )
+              })}
+          {((tab === 'files' && files.length === 0) ||
+            (tab === 'playlists' && playlists.length === 0)) && (
+            <p className="text-body-sm text-text-muted text-center py-6">Nothing to show.</p>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ZoneOption({
+  label,
+  icon = 'description',
+  active,
+  onClick,
+}: {
+  label: string
+  icon?: string
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'flex items-center gap-2 px-2 py-1.5 rounded text-left transition-colors',
+        active
+          ? 'bg-primary/10 text-primary'
+          : 'text-text-vibrant hover:bg-surface-container-high',
+      )}
+    >
+      <Icon name={icon} size={16} className="text-text-muted shrink-0" />
+      <span className="truncate text-body-sm">{label}</span>
+      {active && <Icon name="check" size={16} className="text-primary ml-auto shrink-0" />}
+    </button>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout preview (static — informational)
+// ────────────────────────────────────────────────────────────────────────────
+
+function LayoutPreview({ zones }: { zones: LayoutZone[] }) {
   return (
     <div className="aspect-video bg-surface-container-lowest border border-border-industrial rounded-industrial relative">
       {zones.map((z, i) => (
-        <button
+        <div
           key={i}
-          type="button"
-          onClick={() => onZoneClick(z.id)}
           className={cn(
-            'absolute flex items-center justify-center border-2 transition-colors text-label-caps uppercase',
-            activeZone === z.id
+            'absolute flex items-center justify-center border-2 text-label-caps uppercase',
+            z.id === 'main'
               ? 'border-primary bg-primary/15 text-primary'
-              : 'border-outline-variant bg-surface-container text-text-muted hover:border-outline',
+              : 'border-outline-variant bg-surface-container text-text-muted',
           )}
           style={{
             left: `${z.x * 100}%`,
@@ -532,52 +753,28 @@ function LayoutPreview({
             height: `${z.h * 100}%`,
           }}
         >
-          {z.id}
-        </button>
+          {zoneDisplayLabel(z)}
+        </div>
       ))}
     </div>
   )
 }
 
-function zoneLabel(z: LayoutZone): string {
-  return z.id.toUpperCase()
-}
-
 // ────────────────────────────────────────────────────────────────────────────
-// Insertion helpers
+// Insertion helper (flat main timeline)
 // ────────────────────────────────────────────────────────────────────────────
 
-/**
- * Insert `incoming` into `existing` after the timeline item identified by
- * `targetId`. If the target is the empty drop zone (`drop:<zone>`) or not
- * found, appends to the end of the active zone.
- */
 function insertAfter(
   existing: PlaylistAsset[],
   incoming: PlaylistAsset,
   targetId: string,
-  zone: string,
 ): PlaylistAsset[] {
   const next = [...existing]
-  const match = /^tl:[^:]+:(\d+)$/.exec(targetId)
+  const match = /^tl:(\d+)$/.exec(targetId)
   if (!match) {
-    // Drop on the empty droppable — append at the end of this zone.
-    let lastIdx = -1
-    for (let i = 0; i < next.length; i++) {
-      if ((next[i].option?.zone ?? 'main') === zone) lastIdx = i
-    }
-    next.splice(lastIdx + 1, 0, incoming)
+    next.push(incoming) // dropped on the empty droppable → append
     return next
   }
-  const zoneIdx = Number(match[1])
-  let nth = -1
-  for (let i = 0; i < next.length; i++) {
-    if ((next[i].option?.zone ?? 'main') === zone) nth++
-    if (nth === zoneIdx) {
-      next.splice(i + 1, 0, incoming)
-      return next
-    }
-  }
-  next.push(incoming)
+  next.splice(Number(match[1]) + 1, 0, incoming)
   return next
 }

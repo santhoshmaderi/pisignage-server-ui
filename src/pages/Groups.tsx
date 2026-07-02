@@ -60,10 +60,15 @@ export function Groups() {
   // the freshest group in the query cache so saves (ticker, settings, playlists)
   // are reflected when a dialog re-seeds. Falls back to the snapshot if the group
   // momentarily isn't in the list (e.g. mid-refetch).
-  const liveOpenGroup = useMemo(
-    () => (openGroup ? (groupsQuery.data?.find((g) => g._id === openGroup._id) ?? openGroup) : null),
-    [openGroup, groupsQuery.data],
-  )
+  const liveOpenGroup = useMemo(() => {
+    if (!openGroup) return null
+    // Not loaded yet → keep showing the snapshot (avoids a flash on first load).
+    if (!groupsQuery.data) return openGroup
+    // Loaded: render the fresh copy, or close the detail if the group is gone
+    // (e.g. it was just deleted). React Query keeps prior data during refetches,
+    // so this only goes null on a real removal, not mid-refetch.
+    return groupsQuery.data.find((g) => g._id === openGroup._id) ?? null
+  }, [openGroup, groupsQuery.data])
 
   const memberCountByGroupId = useMemo(() => {
     const map = new Map<string, number>()
@@ -242,7 +247,10 @@ function GroupCard({
               <Icon name="more_vert" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          {/* Radix portals bubble events through the React tree, so a click on
+              any menu item would otherwise reach the Card's onClick and open the
+              group. Stop it here so Delete/Deploy/Rename don't also open it. */}
+          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
             <DropdownMenuLabel>{group.name}</DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={onOpen}>

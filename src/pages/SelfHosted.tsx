@@ -19,27 +19,22 @@ const FEATURES: Feature[] = [
   {
     icon: 'dashboard_customize',
     title: 'Templates & Layout Designer',
-    desc: 'Drag-and-drop multi-zone templates, custom HTML widgets, and reusable designs to build rich, branded screens fast.',
+    desc: 'Template designer allows you to create custom layouts that can then be used in Playlists and groups.',
   },
   {
     icon: 'verified',
     title: 'White-label',
-    desc: 'Fully re-brand the product and serve it from your own domain — ideal for agencies running client fleets.',
+    desc: 'Fully rebrand PiSignage as your own product and build your digital signage business. — ideal for agencies running client fleets.',
   },
   {
     icon: 'badge',
     title: 'SSO Integrations',
-    desc: 'Authenticate via SAML 2.0 / OAuth (Google, Microsoft Entra/Azure AD, Okta) so users sign in with your existing identity provider.',
+    desc: 'Authenticate via SAML 2.0 / OAuth (Google, Microsoft Entra/Azure AD) so users sign in with your existing identity provider.',
   },
   {
     icon: 'apartment',
     title: 'Reseller / Multi-tenant',
     desc: 'Run a reseller business: manage many isolated installations and customers from one server, each with its own players, media, branding and billing.',
-  },
-  {
-    icon: 'schedule',
-    title: 'Advanced Scheduling',
-    desc: 'Day-parting, campaigns, priority/emergency takeovers and conditional playback across large player groups.',
   },
   {
     icon: 'api',
@@ -54,7 +49,7 @@ const FEATURES: Feature[] = [
   {
     icon: 'verified_user',
     title: 'Priority Support & SLAs',
-    desc: 'Dedicated support, guided onboarding and uptime SLAs for production deployments at scale.',
+    desc: 'Get priority support from our team that built the product. We are here to help you succeed.',
   },
 ]
 
@@ -72,13 +67,13 @@ export function SelfHosted() {
             piSignage Self-Hosted Server
           </h1>
           <p className="text-body-lg text-text-muted max-w-2xl">
-            You're running the open-source server. Upgrade to the self-hosted (Pro) server for
+            You're running the open-source server. Upgrade to the self-hosted server for
             enterprise features — multi-user management, SSO, templates, white-labeling and more —
             all running on your own infrastructure with full data ownership.
           </p>
           <div className="flex flex-wrap gap-3 pt-1">
             <a
-              href={PISIGNAGE_URL}
+               href={`${PISIGNAGE_URL}/partners`}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-2 bg-primary text-on-primary font-bold px-5 py-2.5 rounded-lg hover:bg-primary-container transition-colors"
@@ -87,7 +82,7 @@ export function SelfHosted() {
               <Icon name="open_in_new" size={18} />
             </a>
             <a
-              href={`${PISIGNAGE_URL}/contact`}
+              href={`${PISIGNAGE_URL}/support`}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-2 border border-border-industrial text-text-vibrant px-5 py-2.5 rounded-lg hover:bg-surface-container-high transition-colors"
@@ -121,7 +116,7 @@ export function SelfHosted() {
           </p>
         </div>
         <a
-          href={PISIGNAGE_URL}
+          href={`${PISIGNAGE_URL}/pricing`}
           target="_blank"
           rel="noreferrer"
           className="inline-flex items-center gap-2 shrink-0 bg-primary text-on-primary font-bold px-5 py-2.5 rounded-lg hover:bg-primary-container transition-colors"

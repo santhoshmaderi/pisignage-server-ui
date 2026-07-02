@@ -28,9 +28,11 @@ export function SideNav({ username }: SideNavProps) {
   return (
     <nav className="bg-surface-container w-60 h-screen fixed left-0 top-0 border-r border-border-industrial flex flex-col py-6 z-50">
       <div className="px-6 mb-8 flex items-center gap-3">
-        <div className="w-8 h-8 rounded-industrial bg-primary flex items-center justify-center">
-          <Icon name="monitor" className="text-on-primary" filled />
-        </div>
+        <img
+          src={`${import.meta.env.BASE_URL}favicon.png`}
+          alt="piSignage"
+          className="w-8 h-8 rounded-industrial object-contain"
+        />
         <h1 className="text-headline-sm font-bold text-primary">piSignage</h1>
       </div>
 
@@ -74,13 +76,15 @@ export function SideNav({ username }: SideNavProps) {
           className="block bg-surface-container-high border border-border-industrial rounded-lg p-4 space-y-2 hover:border-primary/50 transition-colors"
         >
           <div className="flex items-center gap-2 text-primary">
-            <Icon name="dns" size={18} />
+            <img
+              src={`${import.meta.env.BASE_URL}favicon.png`}
+              alt=""
+              className="w-[18px] h-[18px] object-contain shrink-0"
+            />
             <span className="text-label-caps uppercase tracking-wider">Self-Hosted Server</span>
           </div>
           <p className="text-body-sm text-text-muted">
-          Level up your signage — Multi-user Management, Branding, SSO, ready-to-go
-          Templates, etc., all in one place
-          </p>
+          Upgrade Your Signage Experience with Multi-User Access, Branding ,SSO, Templates and more           </p>
           <span className="inline-flex items-center gap-1 text-body-sm text-primary">
             Learn More
             <Icon name="arrow_forward" size={14} />

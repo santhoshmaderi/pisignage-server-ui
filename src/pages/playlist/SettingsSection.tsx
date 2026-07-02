@@ -14,6 +14,10 @@ export type SettingsSectionProps = {
 export function SettingsSection({ playlist, onChange }: SettingsSectionProps) {
   const ticker = playlist.settings?.ticker ?? {}
   const audio = playlist.settings?.audio ?? {}
+  const ads = playlist.settings?.ads ?? {}
+  const domination = playlist.settings?.domination ?? {}
+  const event = playlist.settings?.event ?? {}
+  const keyPress = playlist.settings?.keyPress ?? {}
 
   const setTicker = (patch: Partial<typeof ticker>) =>
     onChange({
@@ -33,10 +37,29 @@ export function SettingsSection({ playlist, onChange }: SettingsSectionProps) {
       settings: { ...playlist.settings, audio: { ...audio, ...patch } },
     })
 
+  const setAds = (patch: Partial<typeof ads>) =>
+    onChange({ ...playlist, settings: { ...playlist.settings, ads: { ...ads, ...patch } } })
+
+  const setDomination = (patch: Partial<typeof domination>) =>
+    onChange({
+      ...playlist,
+      settings: { ...playlist.settings, domination: { ...domination, ...patch } },
+    })
+
+  const setEvent = (patch: Partial<typeof event>) =>
+    onChange({ ...playlist, settings: { ...playlist.settings, event: { ...event, ...patch } } })
+
+  const setKeyPress = (patch: Partial<typeof keyPress>) =>
+    onChange({
+      ...playlist,
+      settings: { ...playlist.settings, keyPress: { ...keyPress, ...patch } },
+    })
+
   const setRoot = (patch: Partial<Playlist['settings']>) =>
     onChange({ ...playlist, settings: { ...playlist.settings, ...patch } })
 
   return (
+    <div className="flex flex-col gap-4">
     <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
       {/* Ticker */}
       <Card className="p-5 xl:col-span-2 flex flex-col gap-5">
@@ -65,7 +88,7 @@ export function SettingsSection({ playlist, onChange }: SettingsSectionProps) {
               </div>
               <div
                 className="font-mono text-body-sm whitespace-nowrap overflow-hidden"
-                style={{ color: ticker.color ?? '#ffffff', background: ticker.background ?? 'transparent', padding: '4px 8px', borderRadius: 2 }}
+                style={{ color: '#ffffff', ...parseCssText(ticker.style), padding: '4px 8px', borderRadius: 2 }}
               >
                 <span className="inline-block animate-[scroll_18s_linear_infinite]">
                   {ticker.messages || ticker.text || 'Set ticker text below to preview…'}
@@ -115,46 +138,27 @@ export function SettingsSection({ playlist, onChange }: SettingsSectionProps) {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <FieldLabel label="Speed">
                 <NativeSelect
-                  // Coerce: some pisignage forks store speed as numeric (1-5).
-                  // We map any non-string value to 'normal' for the picker;
-                  // the saved value re-becomes a string ('slow' | 'normal' | 'fast').
-                  value={
-                    typeof ticker.textSpeed === 'string' ? ticker.textSpeed : 'normal'
-                  }
-                  onChange={(v) => setTicker({ textSpeed: v })}
+                  // pisignage stores ticker speed as numeric 1/2/3. NativeSelect
+                  // works in strings, so convert at the boundary.
+                  value={String(toSpeedNumber(ticker.textSpeed))}
+                  onChange={(v) => setTicker({ textSpeed: Number(v) })}
                   options={[
-                    { value: 'slow', label: 'Slow' },
-                    { value: 'normal', label: 'Normal' },
-                    { value: 'fast', label: 'Fast' },
+                    { value: '1', label: 'Slow' },
+                    { value: '2', label: 'Normal' },
+                    { value: '3', label: 'Fast' },
                   ]}
                 />
               </FieldLabel>
-              <FieldLabel label="Position">
-                <NativeSelect
-                  value={ticker.position ?? 'bottom'}
-                  onChange={(v) => setTicker({ position: v })}
-                  options={[
-                    { value: 'top', label: 'Top' },
-                    { value: 'bottom', label: 'Bottom' },
-                  ]}
-                />
-              </FieldLabel>
-              <FieldLabel label="Color">
-                <div className="flex gap-2 h-9">
-                  <input
-                    type="color"
-                    aria-label="Ticker text color"
-                    value={ticker.color ?? '#ffffff'}
-                    onChange={(e) => setTicker({ color: e.target.value })}
-                    className="h-9 w-12 bg-canvas-depth-1 border border-border-industrial rounded-industrial cursor-pointer"
-                  />
+              <div className="md:col-span-2">
+                <FieldLabel label="Style (CSS)">
                   <Input
-                    value={ticker.color ?? '#ffffff'}
-                    onChange={(e) => setTicker({ color: e.target.value })}
+                    placeholder="e.g. color:#eee; font-style:italic;"
+                    value={ticker.style ?? ''}
+                    onChange={(e) => setTicker({ style: e.target.value })}
                     className="font-mono"
                   />
-                </div>
-              </FieldLabel>
+                </FieldLabel>
+              </div>
             </div>
           </>
         )}
@@ -173,15 +177,8 @@ export function SettingsSection({ playlist, onChange }: SettingsSectionProps) {
         </header>
 
         <ToggleRow
-          label="Shuffle assets"
-          description="Randomize playback order each loop."
-          checked={!!playlist.settings?.random}
-          onChange={(v) => setRoot({ random: v })}
-        />
-
-        <ToggleRow
-          label="Audio output"
-          description="Players are muted by default."
+          label="Independent audio playlist"
+          description="Play this playlist's audio out the aux / 3.5 mm port (mp3 files only)."
           checked={!!audio.enable}
           onChange={(v) => setAudio({ enable: v })}
         />
@@ -192,6 +189,11 @@ export function SettingsSection({ playlist, onChange }: SettingsSectionProps) {
               label="Shuffle audio"
               checked={!!audio.random}
               onChange={(v) => setAudio({ random: v })}
+            />
+            <ToggleRow
+              label="Also output on HDMI"
+              checked={!!audio.hdmi}
+              onChange={(v) => setAudio({ hdmi: v })}
             />
             <FieldLabel label={`Volume — ${audio.volume ?? 100}%`}>
               <Slider
@@ -205,19 +207,199 @@ export function SettingsSection({ playlist, onChange }: SettingsSectionProps) {
           </div>
         )}
 
-        <FieldLabel label="Transition">
-          <NativeSelect
-            value={playlist.settings?.transition ?? 'none'}
-            onChange={(v) => setRoot({ transition: v })}
-            options={[
-              { value: 'none', label: 'Cut (no transition)' },
-              { value: 'fade', label: 'Cross-fade' },
-              { value: 'slide', label: 'Slide' },
-            ]}
-          />
-        </FieldLabel>
       </Card>
+      </div>
+
+      {/* Advanced playback behaviours — parity with the legacy ad / event / key popups */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Advertisement playlist */}
+        <Card className="p-5 flex flex-col gap-4">
+          <header>
+            <h3 className="text-headline-sm text-text-vibrant flex items-center gap-2">
+              <Icon name="campaign" className="text-primary" size={20} />
+              Advertisement Playlist
+            </h3>
+            <p className="text-body-sm text-text-muted mt-1">
+              Insert this playlist's assets periodically into the currently playing playlist.
+            </p>
+          </header>
+          <ToggleRow
+            label="Make this an advert playlist"
+            checked={!!ads.adPlaylist}
+            onChange={(v) => setAds({ adPlaylist: v })}
+          />
+          {ads.adPlaylist && (
+            <div className="space-y-3 pl-1">
+              <ToggleRow
+                label="Don't play the main playlist"
+                checked={!!ads.noMainPlay}
+                onChange={(v) => setAds({ noMainPlay: v })}
+              />
+              <FieldLabel label="Assets per insertion">
+                <NumberInput value={ads.adCount ?? 1} min={1} onChange={(n) => setAds({ adCount: n })} />
+              </FieldLabel>
+              <FieldLabel label="Interval (seconds)">
+                <NumberInput value={ads.adInterval ?? 60} min={0} onChange={(n) => setAds({ adInterval: n })} />
+              </FieldLabel>
+            </div>
+          )}
+        </Card>
+
+        {/* Domination */}
+        <Card className="p-5 flex flex-col gap-4">
+          <header>
+            <h3 className="text-headline-sm text-text-vibrant flex items-center gap-2">
+              <Icon name="timer" className="text-primary" size={20} />
+              Play once during selected duration
+            </h3>
+            <p className="text-body-sm text-text-muted mt-1">
+              Play this playlist once every selected duration by stopping the regular
+              playlist — like inserting an advert at fixed intervals.
+            </p>
+          </header>
+          <ToggleRow
+            label="Enable (domination content)"
+            checked={!!domination.enable}
+            onChange={(v) => setDomination({ enable: v })}
+          />
+          {domination.enable && (
+            <FieldLabel label="Every (minutes)">
+              <NumberInput
+                value={domination.timeInterval ?? 60}
+                min={1}
+                onChange={(n) => setDomination({ timeInterval: n })}
+              />
+            </FieldLabel>
+          )}
+        </Card>
+
+        {/* Event playlist */}
+        <Card className="p-5 flex flex-col gap-4">
+          <header>
+            <h3 className="text-headline-sm text-text-vibrant flex items-center gap-2">
+              <Icon name="bolt" className="text-primary" size={20} />
+              Event Playlist
+            </h3>
+            <p className="text-body-sm text-text-muted mt-1">
+              When a SIGUSR2 event is signalled this playlist is played if eligible.
+            </p>
+          </header>
+          <ToggleRow
+            label="Enable"
+            checked={!!event.enable}
+            onChange={(v) => setEvent({ enable: v })}
+          />
+          {event.enable && (
+            <FieldLabel label="Duration (seconds, 0 = until next event)">
+              <NumberInput
+                value={Number(event.duration ?? 0)}
+                min={0}
+                onChange={(n) => setEvent({ duration: n })}
+              />
+            </FieldLabel>
+          )}
+        </Card>
+
+        {/* Key event playlist */}
+        <Card className="p-5 flex flex-col gap-4">
+          <header>
+            <h3 className="text-headline-sm text-text-vibrant flex items-center gap-2">
+              <Icon name="keyboard" className="text-primary" size={20} />
+              Key Event Playlist
+            </h3>
+            <p className="text-body-sm text-text-muted mt-1">
+              When the assigned key is pressed this playlist is played if eligible.
+            </p>
+          </header>
+          <ToggleRow
+            label="Enable"
+            checked={!!keyPress.enable}
+            onChange={(v) => setKeyPress({ enable: v })}
+          />
+          {keyPress.enable && (
+            <div className="space-y-3 pl-1">
+              <FieldLabel label="Key code">
+                <NumberInput
+                  value={keyPress.key ?? 0}
+                  min={0}
+                  onChange={(n) => setKeyPress({ key: n })}
+                />
+              </FieldLabel>
+              <ToggleRow
+                label="Play once, then resume"
+                checked={!!keyPress.playOnceParameter}
+                onChange={(v) => setKeyPress({ playOnceParameter: v })}
+              />
+            </div>
+          )}
+        </Card>
+
+        {/* Online only */}
+        <Card className="p-5 flex flex-col gap-4 md:col-span-2">
+          <header>
+            <h3 className="text-headline-sm text-text-vibrant flex items-center gap-2">
+              <Icon name="wifi" className="text-primary" size={20} />
+              Play only when online
+            </h3>
+            <p className="text-body-sm text-text-muted mt-1">
+              Schedule this playlist to play only when the player is online.
+            </p>
+          </header>
+          <ToggleRow
+            label="Enable"
+            checked={!!playlist.settings?.onlineOnly}
+            onChange={(v) => setRoot({ onlineOnly: v })}
+          />
+        </Card>
+      </div>
     </div>
+  )
+}
+
+/** Normalise ticker speed to pisignage's numeric scale: 1 (slow) / 2 / 3 (fast). */
+function toSpeedNumber(v: unknown): number {
+  if (v === 'slow') return 1
+  if (v === 'normal') return 2
+  if (v === 'fast') return 3
+  const n = Number(v)
+  return n === 1 || n === 2 || n === 3 ? n : 2
+}
+
+/** Parse a CSS declaration string ("color:#eee; font-style:italic;") into a
+ *  React style object so the ticker.style value can drive the live preview. */
+function parseCssText(css?: string): React.CSSProperties {
+  const style: Record<string, string> = {}
+  for (const decl of (css ?? '').split(';')) {
+    const idx = decl.indexOf(':')
+    if (idx === -1) continue
+    const prop = decl.slice(0, idx).trim()
+    const val = decl.slice(idx + 1).trim()
+    if (!prop || !val) continue
+    style[prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = val
+  }
+  return style as React.CSSProperties
+}
+
+function NumberInput({
+  value,
+  onChange,
+  min,
+  max,
+}: {
+  value: number
+  onChange: (n: number) => void
+  min?: number
+  max?: number
+}) {
+  return (
+    <Input
+      type="number"
+      min={min}
+      max={max}
+      value={Number.isFinite(value) ? value : 0}
+      onChange={(e) => onChange(Number(e.target.value))}
+      className="font-mono"
+    />
   )
 }
 

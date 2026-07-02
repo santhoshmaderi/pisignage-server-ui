@@ -181,7 +181,14 @@ type PlaylistBehaviorSettings = {
 /** Minimal shape collectGroupAssets needs from a playlist (matches lib/playlists). */
 type PlaylistLike = {
   name?: string
-  assets?: Array<{ filename?: string }>
+  // `side`/`bottom`/`top` are per-asset zone attachments (a file name or a
+  // "__playlist.json" reference) that must also be synced to the player.
+  assets?: Array<{
+    filename?: string
+    side?: string | null
+    bottom?: string | null
+    top?: string | null
+  }>
   templateName?: string
   settings?: PlaylistBehaviorSettings
 }
@@ -206,6 +213,21 @@ export function collectGroupAssets(
   const add = (f?: string | null) => {
     if (f && f.indexOf('_system') !== 0 && !files.includes(f)) files.push(f)
   }
+  // Add a file reference, and if it's a nested playlist ("__name.json") pull that
+  // playlist's own asset files (and their zone attachments) too — one level deep.
+  const addRef = (f?: string | null) => {
+    if (!f) return
+    add(f)
+    if (f.startsWith('__') && f.endsWith('.json')) {
+      const nested = byName.get(f.slice(2, -5))
+      for (const na of nested?.assets ?? []) {
+        add(na.filename)
+        add(na.side)
+        add(na.bottom)
+        add(na.top)
+      }
+    }
+  }
 
   for (const ref of group.playlists ?? []) {
     const name = playlistRefName(ref)
@@ -213,13 +235,12 @@ export function collectGroupAssets(
     const pl = byName.get(name)
     if (!pl) continue
     for (const a of pl.assets ?? []) {
-      add(a.filename)
-      // A nested playlist referenced as an asset (__sub.json) — pull its files too.
-      const fn = a.filename
-      if (fn && fn.startsWith('__') && fn.endsWith('.json')) {
-        const nested = byName.get(fn.slice(2, -5))
-        for (const na of nested?.assets ?? []) add(na.filename)
-      }
+      addRef(a.filename)
+      // Per-asset zone attachments (side/bottom/top) must be synced as well,
+      // otherwise the zone shows nothing on the player.
+      addRef(a.side)
+      addRef(a.bottom)
+      addRef(a.top)
     }
     add(`__${name}.json`)
     if (pl.templateName) add(pl.templateName)
