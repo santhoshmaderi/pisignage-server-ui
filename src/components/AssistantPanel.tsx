@@ -296,9 +296,9 @@ function TurnView({ turn }: { turn: Turn }) {
 }
 
 // ── Minimal, dependency-free Markdown for exactly what the assistant emits:
-// **bold**, [label](url), bare URLs, bullet lists, blank-line paragraphs. ──
+// `code`, **bold**, [label](url), bare URLs, ordered/bullet lists, paragraphs. ──
 const INLINE_RE =
-  /\*\*(.+?)\*\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s)]+)/g
+  /`([^`]+)`|\*\*(.+?)\*\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s)]+)/g
 
 function renderInline(text: string): ReactNode[] {
   const nodes: ReactNode[] = []
@@ -309,21 +309,32 @@ function renderInline(text: string): ReactNode[] {
   while ((m = INLINE_RE.exec(text))) {
     if (m.index > last) nodes.push(text.slice(last, m.index))
     if (m[1] !== undefined) {
+      // `code` → filename / identifier chip
       nodes.push(
-        <span key={key++} className="font-medium" style={{ color: C.text }}>
+        <code
+          key={key++}
+          className="font-mono text-[12.5px] px-1.5 py-0.5 rounded-md border break-all align-baseline"
+          style={{ backgroundColor: '#0b111c', borderColor: C.borderStrong, color: '#7fe0d1' }}
+        >
           {m[1]}
-        </span>,
+        </code>,
       )
     } else if (m[2] !== undefined) {
       nodes.push(
-        <a key={key++} href={m[3]} target="_blank" rel="noreferrer" className="underline break-words" style={{ color: C.link }}>
+        <span key={key++} className="font-medium" style={{ color: C.text }}>
           {m[2]}
+        </span>,
+      )
+    } else if (m[3] !== undefined) {
+      nodes.push(
+        <a key={key++} href={m[4]} target="_blank" rel="noreferrer" className="underline break-words" style={{ color: C.link }}>
+          {m[3]}
         </a>,
       )
-    } else if (m[4] !== undefined) {
+    } else if (m[5] !== undefined) {
       nodes.push(
-        <a key={key++} href={m[4]} target="_blank" rel="noreferrer" className="underline break-all" style={{ color: C.link }}>
-          {m[4]}
+        <a key={key++} href={m[5]} target="_blank" rel="noreferrer" className="underline break-all" style={{ color: C.link }}>
+          {m[5]}
         </a>,
       )
     }
@@ -336,26 +347,50 @@ function renderInline(text: string): ReactNode[] {
 function Markdown({ text }: { text: string }) {
   const lines = text.split('\n')
   const blocks: ReactNode[] = []
-  let list: ReactNode[] | null = null
+  let items: ReactNode[] | null = null
+  let listType: 'ul' | 'ol' = 'ul'
   let key = 0
 
   const flush = () => {
-    if (list) {
-      blocks.push(
-        <ul key={`ul${key++}`} className="list-disc pl-5 space-y-1 my-1">
-          {list}
-        </ul>,
-      )
-      list = null
+    if (!items) return
+    const cls = 'pl-5 space-y-1.5 my-1 ' + (listType === 'ol' ? 'list-decimal' : 'list-disc')
+    blocks.push(
+      listType === 'ol' ? (
+        <ol key={`ol${key++}`} className={cls} style={{ color: C.textMuted }}>
+          {items}
+        </ol>
+      ) : (
+        <ul key={`ul${key++}`} className={cls} style={{ color: C.textMuted }}>
+          {items}
+        </ul>
+      ),
+    )
+    items = null
+  }
+
+  const pushItem = (type: 'ul' | 'ol', content: string) => {
+    if (items && listType !== type) flush()
+    if (!items) {
+      items = []
+      listType = type
     }
+    items.push(
+      <li key={`li${key++}`} className="pl-1">
+        <span style={{ color: C.text }}>{renderInline(content)}</span>
+      </li>,
+    )
   }
 
   for (const raw of lines) {
     const line = raw.replace(/\s+$/, '')
+    const ordered = line.match(/^\s*\d+[.)]\s+(.*)$/)
+    if (ordered) {
+      pushItem('ol', ordered[1])
+      continue
+    }
     const bullet = line.match(/^\s*[-*]\s+(.*)$/)
     if (bullet) {
-      if (!list) list = []
-      list.push(<li key={`li${key++}`}>{renderInline(bullet[1])}</li>)
+      pushItem('ul', bullet[1])
       continue
     }
     flush()
@@ -372,7 +407,11 @@ function Markdown({ text }: { text: string }) {
       )
       continue
     }
-    blocks.push(<p key={`p${key++}`}>{renderInline(line)}</p>)
+    blocks.push(
+      <p key={`p${key++}`} style={{ color: C.text }}>
+        {renderInline(line)}
+      </p>,
+    )
   }
   flush()
   return <div className="space-y-0.5">{blocks}</div>
