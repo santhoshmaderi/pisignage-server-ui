@@ -31,7 +31,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Icon } from '@/components/Icon'
+import { fetchPlaylists } from '@/lib/playlists'
 import {
+  buildGroupPlaylists,
+  collectGroupAssets,
   createGroup,
   deleteGroup,
   deployGroup,
@@ -105,7 +108,21 @@ export function Groups() {
   })
 
   const deployMut = useMutation({
-    mutationFn: (id: string) => deployGroup(id),
+    mutationFn: async (group: Group) => {
+      // Rebuild the file list and playlist annotations from the playlists as they
+      // are *now*. Deploying with only the flag made the server re-sync the
+      // group's previously stored assets, so files removed from a playlist kept
+      // being synced and "Deployed Assets" showed the old count.
+      const playlists = await queryClient.fetchQuery({
+        queryKey: ['playlists'],
+        queryFn: fetchPlaylists,
+        staleTime: 0,
+      })
+      return deployGroup(group._id, {
+        assets: collectGroupAssets(group, playlists),
+        playlists: buildGroupPlaylists(group, playlists),
+      })
+    },
     onSuccess: () => {
       invalidateGroups()
       queryClient.invalidateQueries({ queryKey: ['players'] })
@@ -189,7 +206,7 @@ export function Groups() {
       <DeployGroupConfirm
         target={deployTarget}
         onOpenChange={(open) => !open && !deployMut.isPending && setDeployTarget(null)}
-        onConfirm={() => deployTarget && deployMut.mutate(deployTarget._id)}
+        onConfirm={() => deployTarget && deployMut.mutate(deployTarget)}
         memberCount={
           deployTarget ? memberCountByGroupId.get(deployTarget._id) ?? 0 : 0
         }

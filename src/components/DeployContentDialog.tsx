@@ -58,7 +58,10 @@ export function DeployContentDialog({
     setRunning(true)
     setDone(false)
     setResults(Object.fromEntries(eligible.map((g) => [g._id, { status: 'pending' as RowStatus }])))
-    const playlists = playlistsQuery.data ?? []
+    // Fresh read so a playlist edited moments ago deploys its current assets.
+    const playlists = await queryClient
+      .fetchQuery({ queryKey: ['playlists'], queryFn: fetchPlaylists, staleTime: 0 })
+      .catch(() => playlistsQuery.data ?? [])
     for (const g of eligible) {
       try {
         await deployGroup(g._id, {

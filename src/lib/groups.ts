@@ -18,8 +18,13 @@ export type PlaylistSchedule = {
   timeEnable?: boolean
   starttime?: string
   endtime?: string
+  /** 1 = Sunday … 7 = Saturday. Absent = every day. */
   weekdays?: number[]
+  /** 1 … 31. Absent = every date. */
   monthdays?: number[]
+  /** Legacy single-day fields read by players older than 1.7.0. */
+  weekday?: number
+  monthday?: number
 }
 
 /**

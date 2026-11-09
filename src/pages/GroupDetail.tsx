@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -26,6 +26,7 @@ import {
 import { fetchPlaylists } from '@/lib/playlists'
 import { GroupTickerDialog } from './GroupTickerDialog'
 import { GroupSettingsDialog } from './GroupSettingsDialog'
+import { PlaylistScheduleDialog } from './PlaylistScheduleDialog'
 
 /** Shared pill style for the group action buttons (matches the Assets filter chips). */
 const GROUP_PILL = 'px-3 py-1 rounded-full border text-label-caps uppercase tracking-wider transition-colors'
@@ -53,14 +54,23 @@ function fmtTime(v?: string): string {
 function fmtDate(v?: string): string {
   if (!v) return ''
   const d = new Date(v)
-  return isNaN(d.getTime()) ? v : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  // Dates are stored as UTC midnight; format in UTC so they don't shift a day.
+  return isNaN(d.getTime())
+    ? v
+    : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
 }
+
+const WEEKDAY_ABBR = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'] // 1 = Sunday
 
 function scheduleSummary(s?: PlaylistSchedule): string {
   if (!s) return ''
   const parts: string[] = []
   if (s.timeEnable && s.starttime && s.endtime) parts.push(`${fmtTime(s.starttime)} - ${fmtTime(s.endtime)}`)
   if (s.durationEnable && s.startdate && s.enddate) parts.push(`${fmtDate(s.startdate)} - ${fmtDate(s.enddate)}`)
+  if (s.weekdays && s.weekdays.length < 7)
+    parts.push(s.weekdays.length ? s.weekdays.map((d) => WEEKDAY_ABBR[d - 1]).join(' ') : 'No week days')
+  if (s.monthdays && s.monthdays.length < 31)
+    parts.push(s.monthdays.length ? `Dates ${s.monthdays.join(',')}` : 'No dates')
   return parts.join('  ·  ')
 }
 
@@ -82,7 +92,10 @@ export function GroupDetail({
   const [emergencyOpen, setEmergencyOpen] = useState(false)
   const [tickerOpen, setTickerOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Index into `additional` whose schedule dialog is open (null = closed).
+  const [scheduleIdx, setScheduleIdx] = useState<number | null>(null)
 
+  const queryClient = useQueryClient()
   const playlistsQuery = useQuery({ queryKey: ['playlists'], queryFn: fetchPlaylists, staleTime: 60_000 })
   const playlistNames = useMemo(
     () => (playlistsQuery.data ?? []).map((p) => p.name).filter(Boolean),
@@ -95,18 +108,23 @@ export function GroupDetail({
   })
 
   const deployMut = useMutation({
-    mutationFn: () =>
+    mutationFn: async () => {
+      // Read the playlists fresh at deploy time: the cached query can be up to a
+      // minute old, and a stale copy re-deploys assets that were just removed
+      // from a playlist (wrong "Deployed Assets" count, stale files on players).
+      const fresh = await queryClient.fetchQuery({ queryKey: ['playlists'], queryFn: fetchPlaylists, staleTime: 0 })
       // Expand the group's playlists into the concrete file list the server syncs
       // to players (the server does not compute this — see collectGroupAssets).
       // Use the local `playlists` draft, not the `group` prop, which is a stale
       // snapshot from when the detail view opened (the prop isn't re-passed after
       // edits, so it can miss a playlist you just assigned).
-      deployGroup(group._id, {
-        assets: collectGroupAssets({ playlists: playlists as PlaylistRef[], logo: group.logo }, playlistsQuery.data ?? []),
+      return deployGroup(group._id, {
+        assets: collectGroupAssets({ playlists: playlists as PlaylistRef[], logo: group.logo }, fresh),
         // Annotate each playlist (plType/skipForSchedule + behavior settings) so
         // the player schedules it after a reboot — not just on the live sync.
-        playlists: buildGroupPlaylists({ playlists: playlists as PlaylistRef[] }, playlistsQuery.data ?? []),
-      }),
+        playlists: buildGroupPlaylists({ playlists: playlists as PlaylistRef[] }, fresh),
+      })
+    },
     onSuccess: onChanged,
   })
 
@@ -145,6 +163,13 @@ export function GroupDetail({
     const actual = idx + 1
     const next = [...playlists]
     next[actual] = { ...next[actual], name }
+    commitPlaylists(next)
+  }
+
+  const setAdditionalSchedule = (idx: number, settings: PlaylistSchedule) => {
+    const actual = idx + 1
+    const next = [...playlists]
+    next[actual] = { ...next[actual], settings }
     commitPlaylists(next)
   }
 
@@ -334,12 +359,24 @@ export function GroupDetail({
                       </div>
                     </div>
                     <div className="col-span-4">
-                      <div className="flex items-center gap-2 text-text-muted font-data-mono text-body-sm">
+                      <button
+                        type="button"
+                        onClick={() => setScheduleIdx(i)}
+                        title="Edit schedule"
+                        className="flex items-center gap-2 text-text-muted hover:text-primary font-data-mono text-body-sm text-left transition-colors"
+                      >
                         <Icon name="calendar_today" size={14} />
-                        <span>{scheduleSummary(pl.settings) || 'Always'}</span>
-                      </div>
+                        <span>{scheduleSummary(pl.settings) || 'Always — click to schedule'}</span>
+                      </button>
                     </div>
                     <div className="col-span-2 text-right">
+                      <button
+                        onClick={() => setScheduleIdx(i)}
+                        aria-label={`Schedule ${pl.name}`}
+                        className="text-text-muted hover:text-primary transition-colors p-2"
+                      >
+                        <Icon name="edit_calendar" size={16} />
+                      </button>
                       <button
                         onClick={() => removeAdditional(i)}
                         aria-label={`Remove ${pl.name}`}
@@ -355,6 +392,14 @@ export function GroupDetail({
           </div>
         </div>
       </div>
+      <PlaylistScheduleDialog
+        playlistName={scheduleIdx != null ? (additional[scheduleIdx]?.name ?? '') : ''}
+        settings={scheduleIdx != null ? additional[scheduleIdx]?.settings : undefined}
+        open={scheduleIdx != null && !!additional[scheduleIdx]}
+        onOpenChange={(o) => !o && setScheduleIdx(null)}
+        onSave={(s) => scheduleIdx != null && setAdditionalSchedule(scheduleIdx, s)}
+      />
+
       <EmergencyMessageDialog
         group={group}
         open={emergencyOpen}
